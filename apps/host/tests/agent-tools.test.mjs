@@ -91,7 +91,27 @@ test('the preset: our list is the Harness standard list minus exactly what the a
   assert.equal(web.fetch, true); assert.equal(web.search, false, 'the preset alone leaves search to the profile, which switches it on (DuckDuckGo needs no key)');
   assert.equal(web.fetchMaxOutputChars, 8000, 'a fetched page cannot consume most of the next model request');
   assert.equal(standardPreset({ search: true }).plugins.find(p => p.id === 'tool-web').config.search, true);
+  const jobs = standardPreset().plugins.find(p => p.id === 'tool-jobs').config;
+  assert.ok(jobs.waitTimeoutMs <= jobs.maxWaitTimeoutMs && jobs.maxWaitTimeoutMs <= 15_000,
+    'a background job read must release the agent promptly for added task messages');
   assert.ok(!ids.includes('tool-schedule'), 'Tasks is the only scheduler');
+});
+
+test('a long job_output request releases the agent within the configured wait cap', { skip: skip || process.platform === 'win32' }, async t => {
+  const r = await rig(t);
+  const started = await r.call('job-wait-cap', 'bash', {
+    description: 'Start a delayed background command', command: 'sleep 40', run_in_background: true,
+  }, { mode: 'bypass' });
+  const id = /started background job (bash-[a-z0-9]+)/i.exec(last(started)?.result ?? '')?.[1];
+  assert.ok(id, 'the background command returned a job id');
+  try {
+    const at = Date.now();
+    const read = await r.call('job-wait-cap', 'job_output', { job_id: id, wait: true, timeout_ms: 600_000 }, { mode: 'bypass' });
+    assert.ok(Date.now() - at < 22_000, 'the 10-minute request returned within the 15-second cap');
+    assert.match(last(read)?.result ?? '', /status: running/i, 'the job keeps running after the read');
+  } finally {
+    await r.call('job-wait-cap', 'job_kill', { job_id: id }, { mode: 'bypass' });
+  }
 });
 
 test('on-demand categories separate browser backends and hide unrequested schemas', () => {

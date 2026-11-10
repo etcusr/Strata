@@ -1370,9 +1370,27 @@ export function newSession(): Session {
 
 export function setChatPreferences(id: string | undefined, preferences: NonNullable<Session['preferences']>) {
   const sessionId = id ?? newSession().id;
+  const previousMode = state.sessions.find(s => s.id === sessionId)?.preferences?.mode;
   patchSession(sessionId, s => ({ ...s, preferences: { ...s.preferences, ...preferences } }));
-  // A mode change applies to the very next tool call of a turn that is already running (a goal and its helpers included).
-  if (preferences.mode && liveTurns.get(sessionId)?.agent) void api.post('/api/chat/mode', { sessionId, mode: preferences.mode }).catch(() => undefined);
+  // The menu changes immediately, but a running agent must confirm the new mode. If it cannot,
+  // put the menu back so it never shows Bypass while the host is still asking as Manual.
+  if (preferences.mode && liveTurns.get(sessionId)?.agent && ['manual', 'plan', 'bypass'].includes(preferences.mode))
+    void applyLiveMode(sessionId, preferences.mode, previousMode);
+}
+
+async function applyLiveMode(sessionId: string, mode: NonNullable<Session['preferences']>['mode'], previousMode: NonNullable<Session['preferences']>['mode']) {
+  try {
+    const result = await api.post<{ applied: boolean; reason?: string }>('/api/chat/mode', { sessionId, mode });
+    if (!result.applied) throw new Error(result.reason ?? 'The running chat has no agent session yet.');
+  } catch (error) {
+    if (state.sessions.find(s => s.id === sessionId)?.preferences?.mode !== mode) return;
+    patchSession(sessionId, s => {
+      const next = { ...s.preferences };
+      if (previousMode === undefined) delete next.mode; else next.mode = previousMode;
+      return { ...s, preferences: next };
+    });
+    pushToast('error', 'Could not switch permissions', error instanceof Error ? error.message : String(error));
+  }
 }
 export function setPreviewTabClosed(sessionId:string|undefined, artifactId:string, closed:boolean, selected:string|null) {
   if(!sessionId)return;
@@ -2099,7 +2117,14 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
         const type = frame.type as string;
         if (type === 'delta' || type === 'reasoning') { queueText(type, String(frame.text ?? '')); return; }
         flushWaiting();
-        if (type === 'start' && frame.agent === true) { const turn = liveTurns.get(sessionId); if (turn) turn.agent = true; }
+        if (type === 'start' && frame.agent === true) {
+          const turn = liveTurns.get(sessionId); if (turn) turn.agent = true;
+          // The menu can change while the agent is starting, before there is a session to update.
+          // Apply that choice as soon as the host reports its actual starting mode.
+          const desired = state.sessions.find(s => s.id === sessionId)?.preferences?.mode;
+          if (desired && ['manual', 'plan', 'bypass'].includes(desired) && desired !== frame.mode)
+            void applyLiveMode(sessionId, desired, String(frame.mode ?? 'manual') as NonNullable<Session['preferences']>['mode']);
+        }
         // The host has a turn to take over: the failure the page wrote when it lost the stream no longer applies.
         if (type === 'start' && frame.resumed === true) patchAssistant(m => ({ ...m, error: undefined, errorCode: undefined }));
         if (type === 'queued') {

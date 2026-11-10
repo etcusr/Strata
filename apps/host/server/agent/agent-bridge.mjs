@@ -283,6 +283,14 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     if (value.type === 'waterfall' && value.event === 'approval/request') {
       const r = value.request ?? {};
       if (!r.callId) return;
+      const owner = chats.get(chatOfSession(value.agentId))?.turn ?? [...chats.values()].find(c => c.turn?.children.has(value.agentId))?.turn;
+      const mode = owner && !owner.finished && !owner.stopping ? owner.requestedMode ?? owner.mode : null;
+      // A mode switch may arrive while an approval is being created. Treat the user's new choice as
+      // authoritative here, even before /permission finishes, so no new question can strand the switch.
+      if (mode === 'bypass' || mode === 'plan') {
+        void runtime.gw.answerEvent({ clientId: runtime.clientId, eventId: value.eventId, outcome: mode === 'bypass' ? 'allowed-once' : 'rejected' }).catch(e => log(`agent · could not settle ${mode} approval: ${e.message}`));
+        return;
+      }
       pending.set(`${value.agentId}:${r.callId}`, { eventId: value.eventId, sessionId: value.agentId, callId: r.callId, tool: r.toolName, reason: r.reason ?? null, at: Date.now(), clientId: runtime.clientId });
     } else if (value.type === 'waterfall' && value.event === 'user-questions/request') {
       // The agent of a chat that is running in front of the person asks the person: the question goes to the page (the question card above the message box) and the
@@ -431,8 +439,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       c.route = wanted; c.routeGeneration = runtime.generation;
     }
 
-    // The chat's permission mode is read once, here, for this whole turn. A change the user makes while the
-    // turn runs applies to the next one, so a running turn never sees its permissions move under it.
+    // Start this turn in the chat's chosen mode. setMode also applies later menu changes to a running turn.
     const appliedMode = planTask ? 'plan' : modeOf(mode);
     await applyMode(runtime, sessionId, appliedMode);
 
@@ -1331,19 +1338,29 @@ ${note.text}
     const sessionId = sessionMap[chatId]?.sessionId;
     if (!rt || !sessionId) return { applied: false, mode: want, reason: 'no session yet' };
     if (c?.turn && c.turn.mode === want) return { applied: true, mode: want, settled: 0 };
-    await applyMode(rt, sessionId, want);
+    const turn = c?.turn;
+    if (turn && want !== 'manual') turn.requestedMode = want;
     let settled = 0;
-    if (c?.turn) {
-      c.turn.mode = want;
-      c.turn.projector.policy = MODE_PRESETS[want].approval;
-      if (want !== 'manual') {
-        const helpers = c.turn.children;
+    try {
+      if (turn && want !== 'manual') {
+        const helpers = turn.children;
+        // Release the approval first. /permission can wait for a blocked turn to continue, so
+        // switching the preset before answering here left Bypass visible while the card still asked.
         for (const [key, entry] of [...pending.entries()]) {
           if (entry.sessionId !== sessionId && !helpers?.has(entry.sessionId)) continue;
           pending.delete(key);
           try { await rt.gw.answerEvent({ clientId: entry.clientId ?? rt.clientId, eventId: entry.eventId, outcome: want === 'bypass' ? 'allowed-once' : 'rejected' }); settled++; } catch { /* already answered */ }
         }
       }
+      await applyMode(rt, sessionId, want);
+    } catch (e) {
+      if (turn?.requestedMode === want) turn.requestedMode = null;
+      throw e;
+    }
+    if (turn) {
+      if (turn.requestedMode === want) turn.requestedMode = null;
+      turn.mode = want;
+      turn.projector.policy = MODE_PRESETS[want].approval;
     }
     return { applied: true, mode: want, settled };
   }

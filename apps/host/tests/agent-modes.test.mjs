@@ -224,6 +224,25 @@ test('MODE changing the mode while a turn runs does not touch that turn', { skip
   assert.equal(await r.preset('m-mid'), MODE_PRESETS.bypass.key);
 });
 
+test('switching a waiting parent tool to Bypass answers it without another Approve click', { skip }, async t => {
+  const r = await rig(t);
+  const frames = [];
+  const running = r.run('m-waiting-switch', 'SCRIPT:retrywrite switched-while-waiting.txt yes', {
+    mode: 'manual', onFrame: f => frames.push(f),
+  });
+  for (let i = 0; i < 200 && !states(frames).includes('proposed'); i++) await sleep(50);
+  assert.ok(states(frames).includes('proposed'), 'Manual first asked');
+  const switched = await Promise.race([
+    r.bridge.setMode('m-waiting-switch', 'bypass'),
+    sleep(5000).then(() => { throw new Error('the mode switch stayed blocked on the old approval'); }),
+  ]);
+  assert.equal(switched.settled, 1);
+  await running;
+  assert.equal(lines(join(r.ws, 'switched-while-waiting.txt')), 1);
+  assert.equal(r.bridge.pendingFor('m-waiting-switch').length, 0);
+  assert.equal(await r.preset('m-waiting-switch'), MODE_PRESETS.bypass.key);
+});
+
 test('MODE the mode survives a restart of the agent process: the chat resumes in the mode it is asked for', { skip }, async t => {
   const r = await rig(t);
   await r.run('m-restart', 'SCRIPT:echo one', { mode: 'plan' });

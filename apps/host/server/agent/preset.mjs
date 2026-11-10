@@ -82,7 +82,9 @@ export function standardPreset({ platform = process.platform, search = false, of
       : { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash' },
     { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs' },
     { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
-    { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs' },
+    // A long job_output wait blocks the agent's next step, including a question added to the task.
+    // Background jobs keep running after this bounded read; their completion is delivered separately.
+    { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs', config: { waitTimeoutMs: 10_000, maxWaitTimeoutMs: 15_000 } },
     // The skills of the Skills page, written out as folders the Harness scans (and watches: a skill saved in the app is there at once).
     { id: 'skill-filesystem', name: '@deepseek-ai/dsh-skill-filesystem', ...(skillsDir ? { config: { customSkillDirs: [skillsDir] } } : {}) },
     { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
