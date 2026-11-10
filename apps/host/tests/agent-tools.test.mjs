@@ -17,11 +17,14 @@ import { buildProfile, GATE_PLUGIN } from '../server/agent/profile.mjs';
 import { STANDARD_PLUGIN_IDS, REMOVED_PLUGIN_IDS, standardPreset } from '../server/agent/preset.mjs';
 import { isReadOnlyShell, manualDecision, maskQuotes, READ_ONLY_TOOLS } from '../server/agent/plugins/strata-gate.mjs';
 import { plainToolError, withPlain } from '../server/agent/events.mjs';
+import { apply as applyOnDemand, category, compactJsonBody, visibleTools } from '../server/agent/plugins/strata-on-demand-tools.mjs';
+import { GROUP_IDS } from '../server/agent/tools-catalog.mjs';
 
 const HARNESS = process.env.STRATA_HARNESS_DIR;
 const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
+const shellTool = process.platform === 'win32' ? 'pwsh' : 'bash';
 
 // ---------------------------------------------------------------------------------------------------------- pure
 
@@ -86,8 +89,38 @@ test('the preset: our list is the Harness standard list minus exactly what the a
   assert.ok(standardPreset({ platform: 'linux' }).plugins.some(p => p.id === 'tool-bash') && !standardPreset({ platform: 'linux' }).plugins.some(p => p.id === 'tool-pwsh'));
   const web = standardPreset().plugins.find(p => p.id === 'tool-web').config;
   assert.equal(web.fetch, true); assert.equal(web.search, false, 'the preset alone leaves search to the profile, which switches it on (DuckDuckGo needs no key)');
+  assert.equal(web.fetchMaxOutputChars, 8000, 'a fetched page cannot consume most of the next model request');
   assert.equal(standardPreset({ search: true }).plugins.find(p => p.id === 'tool-web').config.search, true);
   assert.ok(!ids.includes('tool-schedule'), 'Tasks is the only scheduler');
+});
+
+test('on-demand categories separate browser backends and hide unrequested schemas', () => {
+  assert.equal(category('mcp__browser__navigate'), 'browser');
+  assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
+  assert.equal(category('mcp__github__create_issue'), 'connected');
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'bash' }, { name: 'web_search' }]).map(t => t.name), ['tool_catalog']);
+});
+
+test('large JSON web results are condensed before the model sees them', async () => {
+  const raw = JSON.stringify({ current_condition: [{ temp_C: '5', weatherDesc: 'Overcast' }], weather: Array.from({ length: 20 }, (_, i) => ({ date: `day-${i}`, hourly: Array.from({ length: 8 }, () => ({ detail: 'x'.repeat(500) })) })) });
+  assert.ok(raw.length > 40000);
+  const agent = { session: { id: 'test' } };
+  const fetch = { execute: async () => ({ url: 'https://example.test/weather', statusCode: 200, body: { kind: 'text', content: raw }, truncated: false }) };
+  const ctx = { get: () => ({ list: () => [agent] }), tools: { get: () => fetch, register: () => {} }, on: () => {}, llm: {} };
+  applyOnDemand(ctx);
+  const result = await fetch.execute({ url: 'https://example.test/weather' }, { agent });
+  assert.ok(result.body.content.length <= 7800);
+  assert.equal(result.truncated, false);
+  assert.match(result.body.content, /"temp_C":"5"/);
+  assert.match(result.body.content, /Structured JSON condensed/);
+  assert.equal(compactJsonBody('plain text'.repeat(1000)), 'plain text'.repeat(1000), 'ordinary pages keep the web tool’s normal cap');
+});
+
+test('a profile with every tool disabled does not mention an unavailable catalog', () => {
+  const tools = { onDemand: true, off: new Set(GROUP_IDS), search: { provider: 'builtin', key: '' } };
+  const profile = buildProfile({ local: [{ id: 'a', baseUrl: 'http://127.0.0.1:1/v1', modelId: 'm' }], tools });
+  assert.ok(!profile.patch.includes('strata-on-demand-tools.mjs'));
+  assert.ok(!profile.patch.includes('Call tool_catalog'));
 });
 
 test('the profile loads the gate by path, sizes helper agents to the engine slots and keeps no secret', () => {
@@ -113,12 +146,14 @@ test('tool failures are said in plain words with the original text kept after th
 
 // ------------------------------------------------------------------------------------------------- real Harness
 
-async function rig(t) {
-  const worker = await startScriptedWorker({});
+async function rig(t, { onDemand = false, mcpServers = {}, searchMock = null } = {}) {
+  const worker = await startScriptedWorker(onDemand ? { charsPerToken: 4 } : {});
   const dir = mkdtempSync(join(tmpdir(), 'strata-tools-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
-  const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, slots: 4 }];
-  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], env: process.env, startTimeoutMs: 90_000 });
+  const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, slots: 4, mcpServers }];
+  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [],
+    ...(onDemand ? { tools: () => ({ onDemand: true, off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: true, browserEnabled: false, servers: {}, hasInstructionTools: false, hasCommandTools: false }) } : {}),
+    env: process.env, startTimeoutMs: 90_000, searchMock });
   t.after(async () => { await bridge.close(); await worker.close(); cleanup(dir); });
   const run = async (chatId, message, { mode = 'bypass', answer } = {}) => {
     const frames = [];
@@ -137,11 +172,49 @@ async function rig(t) {
 const cards = frames => frames.filter(f => f.type === 'agent-tool').map(f => f.tool);
 const last = frames => cards(frames).at(-1);
 
+test('on-demand tools load for one turn and leave a later greeting small', { skip }, async (t) => {
+  const r = await rig(t, { onDemand: true });
+  const frames = await r.run('catalog', 'SCRIPT:call tool_catalog {"groups":["files","shell"]}');
+  assert.match(last(frames).result, /BatchMode=yes/);
+  const first = r.worker.requests.at(-2), loaded = r.worker.requests.at(-1);
+  assert.deepEqual(first.toolNames, ['tool_catalog']);
+  assert.ok(loaded.toolNames.includes('read') && loaded.toolNames.includes('bash'));
+  assert.ok(!loaded.toolNames.includes('web_search') && !loaded.toolNames.includes('subagent'));
+  await r.run('catalog', 'SCRIPT:hello');
+  const greeting = r.worker.requests.at(-1);
+  assert.deepEqual(greeting.toolNames, ['tool_catalog']);
+  assert.ok(greeting.promptChars < 7000, 'a short reply does not carry the full tool catalog');
+  const fresh = await r.run('fresh-hello', 'SCRIPT:hello');
+  const shown = fresh.filter(f => f.type === 'context').at(-1)?.contextTokens;
+  assert.ok(shown > 0 && shown < 2000, `the context meter reads the compact request (${shown})`);
+});
+
+test('on-demand connected tools stay hidden until the model requests them', { skip }, async (t) => {
+  const mcpServers = { demo: { command: process.execPath, args: [fwd(join(import.meta.dirname, 'helpers', 'mini-mcp.mjs'))] } };
+  const r = await rig(t, { onDemand: true, mcpServers });
+  await r.run('mcp-catalog', 'SCRIPT:call tool_catalog {"groups":["connected"]}');
+  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['tool_catalog']);
+  const loaded = r.worker.requests.at(-1).toolNames;
+  assert.ok(loaded.includes('mcp__demo__shout'));
+  assert.ok(!loaded.includes('bash') && !loaded.includes('web_search'));
+});
+
+test('a short web task sends small requests even after loading web tools', { skip }, async (t) => {
+  const r = await rig(t, { onDemand: true, searchMock: 'offline' });
+  await r.run('weather', 'SCRIPT:weather');
+  const requests = r.worker.requests;
+  assert.equal(requests.length, 4, 'catalog, search, fetch, answer');
+  assert.deepEqual(requests[0].toolNames, ['tool_catalog']);
+  assert.ok(requests.slice(1).every(q => q.toolNames.includes('web_search') && q.toolNames.includes('web_fetch')));
+  assert.ok(requests.every(q => q.promptChars < 8000), 'the whole built-in tool inventory is never sent');
+  assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 28_000, 'the extra catalog step still costs less than one old full-tool request');
+});
+
 test('the agent is offered exactly these tools: everything useful including web search (no key needed), no scheduler, and the question tool the app can answer', { skip }, async (t) => {
   const r = await rig(t);
   await r.run('inv', 'SCRIPT:echo hi');
   const offered = [...r.worker.requests].reverse().find(q => q.toolNames.length)?.toolNames.sort();
-  assert.deepEqual(offered, ['ask_user_question', 'create_goal', 'edit', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'list_subagent_models', 'present', 'pwsh', 'read', 'read_image', 'send_message', 'skill', 'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_fetch', 'web_search', 'workflow', 'working_directory', 'write'].sort());
+  assert.deepEqual(offered, ['ask_user_question', 'create_goal', 'edit', 'get_goal', 'glob', 'grep', 'interrupt_agent', 'job_kill', 'job_list', 'job_output', 'list_agents', 'list_subagent_models', 'present', shellTool, 'read', 'read_image', 'send_message', 'skill', 'subagent', 'subagent_fork', 'todo_write', 'update_goal', 'web_fetch', 'web_search', 'workflow', 'working_directory', 'write'].sort());
   assert.ok(!offered.some(n => n.startsWith('schedule_')) && offered.includes('web_search') && offered.includes('ask_user_question') && !offered.includes('exit_plan_mode'));
 });
 
@@ -167,7 +240,7 @@ test('a tool from each family runs and shows a card the page can render', { skip
   const edited = await r.call('fam-fs', 'edit', { file_path: f, old_string: 'alpha', new_string: 'ALPHA' });
   assert.equal(last(edited).state, 'done'); assert.match(readFileSync(file, 'utf8'), /^ALPHA/);
   // shell family
-  assert.match(last(await r.call('fam-sh', 'pwsh', { command: 'Get-ChildItem', description: 'list files' })).result, /notes\.txt/);
+  assert.match(last(await r.call('fam-sh', shellTool, { command: shellTool === 'pwsh' ? 'Get-ChildItem' : 'ls', description: 'list files' })).result, /notes\.txt/);
   // web family: offline, loopback is refused by the Harness itself; the failure is plain with Details after it
   const web = last(await r.call('fam-web', 'web_fetch', { url: 'http://127.0.0.1:9/' }));
   assert.equal(web.state, 'error'); assert.match(web.result, /^That web page could not be opened/); assert.match(web.result, /Details: /);
@@ -190,11 +263,11 @@ test('Manual: one change is one card. Nothing ran when it appeared, and no sandb
   assert.equal(last(frames).result, 'Denied. Nothing ran.', 'the card says it in plain words, not the model-facing error');
   assert.equal(existsSync(b), false);
   // a shell command that changes things
-  frames = await r.call('man3', 'pwsh', { command: `Set-Content -Path '${c}' -Value x`, description: 'Make c.txt' }, { mode: 'manual', answer: 'approve' });
+  frames = await r.call('man3', shellTool, { command: shellTool === 'pwsh' ? `Set-Content -Path '${c}' -Value x` : `printf x > '${c}'`, description: 'Make c.txt' }, { mode: 'manual', answer: 'approve' });
   assert.deepEqual(cards(frames).map(x => x.state), ['running', 'proposed', 'running', 'done']);
   assert.ok(existsSync(c));
   // a shell command that only looks needs no question
-  frames = await r.call('man4', 'pwsh', { command: 'Get-ChildItem', description: 'List files' }, { mode: 'manual' });
+  frames = await r.call('man4', shellTool, { command: shellTool === 'pwsh' ? 'Get-ChildItem' : 'ls', description: 'List files' }, { mode: 'manual' });
   assert.deepEqual(cards(frames).map(x => x.state), ['running', 'done']);
   // nowhere in any of it does the person see the sandbox talking
   const all = JSON.stringify([...cards(frames), ...cards(await r.call('man5', 'write', { file_path: fwd(join(r.ws, 'd.txt')), content: 'd' }, { mode: 'manual', answer: 'approve' }))]);
@@ -273,8 +346,8 @@ test('the output budget is not the old 8192, and the Reasoning menu reaches the 
   const off = await ask('think-off', 'Off');
   assert.equal(ctk(off).enable_thinking, false); assert.equal(ctk(off).reasoning_effort, undefined);
   assert.equal(off.enable_thinking, undefined, 'a top-level enable_thinking is the field the Strata server ignores');
-  // The profile's budget (19,660 at 64K: what compaction sets aside for a reply) is the header the Harness reads; the request itself may produce half the window (AGENT-LOST).
-  assert.ok(off.max_completion_tokens === 32768, `ceiling ${off.max_completion_tokens} (half the window, at most 64K: never the old 8192, and a file written in one call is not cut at the 30 percent compaction reserves)`);
+  // The profile's budget (13,107 at 64K: what compaction sets aside for a reply) is the header the Harness reads; the request itself may produce half the window (AGENT-LOST).
+  assert.ok(off.max_completion_tokens === 32768, `ceiling ${off.max_completion_tokens} (half the window, at most 64K: never the old 8192, and a file written in one call is not cut at the 20 percent compaction reserves)`);
   const high = await ask('think-high', 'High');
   assert.equal(ctk(high).enable_thinking, true); assert.equal(ctk(high).reasoning_effort, 'high');
   const low = await ask('think-low', 'Low');

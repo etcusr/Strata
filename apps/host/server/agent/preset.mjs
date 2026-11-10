@@ -59,10 +59,11 @@ export const OS_LINES = {
 };
 
 /** AGENT_PROMPT with the sentence for `platform` after its first line. */
-export function agentPromptFor(platform = process.platform) {
+export function agentPromptFor(platform = process.platform, onDemand = false) {
   const line = OS_LINES[platform];
-  if (!line) return AGENT_PROMPT;
-  const [first, ...rest] = AGENT_PROMPT.split('\n\n');
+  const prompt = onDemand ? `${AGENT_PROMPT}\n\nTools start in a compact catalog. Call tool_catalog to load only the groups needed for the task. After it returns, use the newly available tools. A simple reply needs no tool call.` : AGENT_PROMPT;
+  if (!line) return prompt;
+  const [first, ...rest] = prompt.split('\n\n');
   return [first, line, ...rest].join('\n\n');
 }
 
@@ -70,10 +71,10 @@ export function agentPromptFor(platform = process.platform) {
  * @param {{platform?: string, search?: boolean}} [options]
  * @returns {object} the `config` of the `preset-standard` row
  */
-export function standardPreset({ platform = process.platform, search = false, off = new Set(), skillsDir = null, compaction = [] } = {}) {
+export function standardPreset({ platform = process.platform, search = false, off = new Set(), skillsDir = null, compaction = [], onDemand = false } = {}) {
   const windows = platform === 'win32';
   const plugins = [
-    { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: agentPromptFor(platform), complete: true, includeRuntimeContext: false } },
+    { id: 'persona', name: '@deepseek-ai/dsh-persona', config: { prefix: agentPromptFor(platform, onDemand), complete: true, includeRuntimeContext: false } },
     { id: 'agent-instructions', name: '@deepseek-ai/dsh-agent-instructions', config: { maxBytes: 65536 } },
     { id: 'time-context', name: '@deepseek-ai/dsh-time-context' },
     windows
@@ -108,7 +109,7 @@ export function standardPreset({ platform = process.platform, search = false, of
     },
     { id: 'tool-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
     { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
-    { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: !off.has('fetch'), search: search && !off.has('search'), searchTimeoutMs: 60000 } },
+    { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: !off.has('fetch'), search: search && !off.has('search'), searchTimeoutMs: 60000, fetchMaxOutputChars: 8000 } },
     { id: 'present', name: '@deepseek-ai/dsh-tool-present' },
     { id: 'tool-plugin-manager', name: '@deepseek-ai/dsh-plugin-manager/tools', disabled: true },
   ];

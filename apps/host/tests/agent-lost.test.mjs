@@ -131,7 +131,7 @@ const words = frames => frames.filter(f => f.type === 'delta').map(f => f.text).
 const capOf = q => q.params.max_tokens ?? q.params.max_completion_tokens;
 const writes = r => r.worker.requests.filter(q => q.directive === 'cutwrite' || q.directive === 'cutalways');
 
-test('every model request may produce half the window, not the 30 percent the Harness reserves for compaction', { skip }, async (t) => {
+test('every model request may produce half the window, above the 20 percent reply reservation', { skip }, async (t) => {
   const r = await rig(t);
   const out = [];
   await r.bridge.runTurn({ ...r.base('c0', f => out.push(f)), message: 'SCRIPT:echo hello' });
@@ -167,6 +167,27 @@ test('a reply cut inside a file write: the chat says so, the agent is asked to g
   assert.ok(drafts.some(f => !f.draft.done && f.draft.name === 'write'), 'a writing card opened as soon as the model named the call');
   // The Harness hands the streamed pieces over in batches (a few a second at most), so a short script may show only the first and the last.
   assert.ok(drafts.some(f => f.draft.done && f.draft.lost && f.draft.target === 'big.txt' && f.draft.bytes > 1000), 'and taken down, with its file and size, when it was lost');
+});
+
+test('a carry-on that contains only reasoning gets one more prompt and a visible answer', { skip }, async (t) => {
+  const r = await rig(t);
+  const out = [];
+  await r.bridge.runTurn({ ...r.base('c-silent', f => out.push(f)), message: 'SCRIPT:cutthink' });
+  assert.equal(r.worker.requests.filter(q => q.directive === 'cutthink').length, 3);
+  assert.ok(out.some(f => f.type === 'delta' && f.noteReason === 'cut'));
+  assert.match(words(out), /Recovered answer/);
+  assert.equal(out.filter(f => f.type === 'done').at(-1)?.finishReason, 'stop');
+  assert.equal(out.some(f => f.type === 'error'), false);
+});
+
+test('a model that keeps reasoning without answering stops with an explicit notice', { skip }, async (t) => {
+  const r = await rig(t);
+  const out = [];
+  await r.bridge.runTurn({ ...r.base('c-silent-always', f => out.push(f)), message: 'SCRIPT:cutthinkalways' });
+  assert.equal(r.worker.requests.filter(q => q.directive === 'cutthinkalways').length, 3);
+  assert.ok(out.some(f => f.type === 'delta' && f.noteReason === 'empty'));
+  assert.match(words(out), /stopped without writing an answer/);
+  assert.ok(out.some(f => f.type === 'done'));
 });
 
 test(`a model that is cut every time is asked ${MAX_CUT_RETRIES} times, then the turn ends with a plain sentence, never silently`, { skip }, async (t) => {

@@ -26,9 +26,12 @@
  *   SCRIPT:goalstep                 one goal round: get_goal, then update_goal complete, then a short closing text
  *   SCRIPT:planreply                a reply ending with a numbered plan of three steps (each step's text carries SCRIPT:goalstep)
  *   SCRIPT:call <tool> <json>       one call to any tool with the given JSON arguments
+ *   SCRIPT:weather                  catalog -> web search -> fetch -> reply, for measuring a short web task
  *   SCRIPT:multi <json>             {"calls":[[tool,args],...],"say":"final text"}: all the calls in one reply, then the text once their results are in
  *   SCRIPT:searchloop               a model that never stops: every reply rewrites a numbered plan and calls web_search again with a new query
  *   SCRIPT:bloat <prompt tokens>    a reply that is only thinking (no answer text), with usage reporting that many prompt tokens (a context at 100%)
+ *   SCRIPT:cutthink                 a cut reply, then a carry-on with reasoning only; the second nudge gets an answer
+ *   SCRIPT:cutthinkalways           the same, but no nudge ever gets an answer
  *
  * A request whose last message is a tool result is answered with a text that quotes the result.
  */
@@ -152,6 +155,11 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       send({ tool_calls: [{ index: 0, id: `call_${requests.length}`, type: 'function', function: { name: 'web_search', arguments: argsJson } }] });
       return finish('tool_calls', 60);
     }
+    if (directive?.[1] === 'cutthink' || directive?.[1] === 'cutthinkalways') {
+      if (directive[1] === 'cutthink' && messages.some(m => m.role === 'user' && /continuation ended without a visible answer/.test(text(m)))) return say(['Recovered answer.']);
+      send({ role: 'assistant', content: '', reasoning_content: 'Thinking without giving the user an answer.' });
+      return finish(messages.some(m => m.role === 'user' && /cut off by the output limit/.test(text(m))) ? 'stop' : 'length', 4930);
+    }
     if (directive?.[1] === 'cutwrite' || directive?.[1] === 'cutalways') {
       // A reply the length limit cuts inside a tool call (AGENT-LOST): some words, then `write` arguments that never close, finish "length".
       // `cutwrite` is cut once and then, asked to carry on, writes the file in a small call; `cutalways` is cut every time.
@@ -182,6 +190,13 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
         if (id) return toolCall('update_goal', { goal_id: id, revision, action: 'complete' });
       }
       return say(['Step finished. The result is checked.']);
+    }
+    if (directive?.[1] === 'weather' || directive?.[1] === 'weatherold') {
+      const step = toolMessages.length;
+      if (directive[1] === 'weather' && step === 0) return toolCall('tool_catalog', { groups: ['web'] });
+      if (step === (directive[1] === 'weather' ? 1 : 0)) return toolCall('web_search', { queries: ['current weather Moscow'] });
+      if (step === (directive[1] === 'weather' ? 2 : 1)) return toolCall('web_fetch', { url: 'http://127.0.0.1:9/weather' });
+      return say(['The weather source could not be reached.']);
     }
     if (directive?.[1] === 'planslow') return say(['## Slow plan\n\n', '1. First thing SCRIPT:goalstep\n', '2. A step that never finishes SCRIPT:slow 4000\n', '3. Third thing SCRIPT:goalstep\n']);
     if (directive?.[1] === 'planreply') return say(['I looked around the folder first.\n\n## The pagoda plan\n\n', '1. First thing SCRIPT:goalstep\n', '2. Second thing SCRIPT:goalstep\n', '3. Third thing SCRIPT:goalstep\n']);

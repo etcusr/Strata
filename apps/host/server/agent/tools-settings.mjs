@@ -137,6 +137,7 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
     /** For the profile builder: plain values, secrets included. Never sent to the screen. */
     profileView() {
       const s = state();
+      const browserProbe = browser();
       const custom = s.custom.filter(t => t.enabled);
       const servers = {};
       for (const t of custom.filter(t => t.kind === 'server')) {
@@ -144,12 +145,13 @@ export function createAgentTools({ read, write, dataDir, browser = () => ({ foun
         servers[name] = /^https?:\/\//i.test(t.address) ? { url: t.address } : { command: t.address, args: t.args };
       }
       return {
+        onDemand: true,
         off: new Set(s.off),
         search: s.search,
         webWithoutAsking: s.webWithoutAsking,
-        browserEnabled: s.browser.enabled && !!(browser().found && browser().cli),
-        browserPath: browser().path ?? null,
-        browserCli: browser().cli ?? null,
+        browserEnabled: s.browser.enabled && !!(browserProbe.found && browserProbe.cli),
+        browserPath: browserProbe.path ?? null,
+        browserCli: browserProbe.cli ?? null,
         servers,
         hasInstructionTools: custom.some(t => t.kind === 'instructions'),
         hasCommandTools: custom.some(t => t.kind === 'command'),

@@ -5466,6 +5466,19 @@ class SilentEngine(unittest.TestCase):
             gen.close()                                           # the consumer stopped: STOP, then the drain
         self.assertIn("STOP", engine.proc.stdin.getvalue())
         engine.proc.kill.assert_called_once()
+
+    def test_cancelled_request_does_not_hold_the_fifo_for_the_full_silence_limit(self):
+        from serve import server
+        engine = self.bare(300, can_stop=True)
+        engine.lines.put("T 5")
+        gen = engine.generate([1], 10, {}, threading.Event())
+        self.assertEqual(next(gen), 5)
+        started = time.monotonic()
+        with mock.patch.object(server, "STOP_ACK_TIMEOUT_S", 0.1):
+            with self.assertRaises(server.EngineSilent):
+                gen.close()
+        self.assertLess(time.monotonic() - started, 1)
+        engine.proc.kill.assert_called_once()
         self.assertFalse(engine.alive())
 
     def test_frozen_engine_is_ended_by_the_stall_watchdog(self):

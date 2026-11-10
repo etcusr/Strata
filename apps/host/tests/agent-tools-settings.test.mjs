@@ -42,6 +42,7 @@ test('Tools: every tool is on at first, in plain words, and turning one off or o
     const off = tools.update({ groups: { jobs: false, search: false } });
     assert.deepEqual(off.groups.filter(g => !g.enabled).map(g => g.id), ['jobs', 'search']);
     assert.deepEqual([...tools.profileView().off].sort(), ['jobs', 'search']);
+    assert.equal(tools.profileView().onDemand, true);
     assert.ok(tools.update({ groups: { jobs: true } }).groups.find(g => g.id === 'jobs').enabled);
     assert.throws(() => tools.update({ groups: { nonsense: false } }), /not known/);
   } finally { cleanup(dir); }
@@ -289,7 +290,9 @@ async function rig(t, setup) {
   const { tools } = make(dir);
   setup?.(tools, dir);
   const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, slots: 2 }];
-  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], tools: () => tools.profileView(), env: process.env, startTimeoutMs: 90_000 });
+  // These tests inspect the complete pre-filter tool set and execute a named tool
+  // directly; the dedicated on-demand test covers catalog activation.
+  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], tools: () => ({ ...tools.profileView(), onDemand: false }), env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); cleanup(dir); });
   const run = async (chatId, tool, args, { mode = 'bypass', answer } = {}) => {
     const frames = [];

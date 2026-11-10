@@ -1934,6 +1934,27 @@ export async function approvePlan(sessionId: string, planId: string) {
 /** "Start as goal" (and Resume on a paused plan): the host streams the run like any chat turn. */
 export async function startPlanGoal(planId: string) { await sendMessage('', { planId }); }
 
+/** Add an instruction to the live agent turn without ending it or starting another turn. */
+export function isAgentTurn(sessionId: string | null | undefined): boolean {
+  return !!sessionId && liveTurns.get(sessionId)?.agent === true;
+}
+
+export async function steerCurrentTurn(sessionId: string, text: string): Promise<void> {
+  const clean = text.trim();
+  if (!clean || clean.length > 8000 || !isAgentTurn(sessionId)) throw new Error('There is no active agent task to update.');
+  const target = [...(state.sessions.find(s => s.id === sessionId)?.messages ?? [])].reverse().find(m => m.role === 'assistant' && m.streaming);
+  if (!target) throw new Error('There is no active agent task to update.');
+  const requestId = `steer-${crypto.randomUUID()}`;
+  patchSession(sessionId, s => ({ ...s, updatedAt: new Date().toISOString(), messages: s.messages.map(m => m.id === target.id ? { ...m, steering: [...(m.steering ?? []), { id: requestId, text: clean, at: new Date().toISOString(), state: 'sending' }] } : m) }));
+  try {
+    const result = await api.post<{ applied?: boolean }>('/api/chat/steer', { sessionId, message: clean, requestId });
+    patchSession(sessionId, s => ({ ...s, messages: s.messages.map(m => m.steering?.some(entry => entry.id === requestId) ? { ...m, steering: m.steering.map(entry => entry.id === requestId ? { ...entry, state: entry.state === 'applied' || result.applied ? 'applied' as const : m.streaming ? 'accepted' as const : 'missed' as const } : entry) } : m) }));
+  } catch (e) {
+    patchSession(sessionId, s => ({ ...s, messages: s.messages.map(m => m.steering?.some(entry => entry.id === requestId) ? { ...m, steering: m.steering.filter(entry => entry.id !== requestId) } : m) }));
+    throw e;
+  }
+}
+
 export async function sendMessage(text: string, options: { fromLoop?: boolean; goalAction?: 'resume'; planId?: string; shown?: string; title?: string; markdown?: boolean; reattach?: string; requestId?: string } = {}) {
   // `reattach`: a turn the host is still running for this chat (or finished while the page was away) is taken over again after a reload, not started.
   const reattach = options.reattach;
@@ -2109,6 +2130,9 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           // A proposed plan is shown as the plan card in place of this turn's closing text (that text is the plan in prose).
           const planned = frame.plan as { id?: unknown } | null;
           if (frame.event === 'proposed' && planned && typeof planned.id === 'string') { const pid = planned.id; patchAssistant(m => ({ ...m, planId: pid })); }
+        } else if (type === 'steer-applied') {
+          const id = String(frame.requestId ?? '');
+          patchSession(sessionId, sess => ({ ...sess, messages: sess.messages.map(m => m.steering?.some(entry => entry.id === id) ? { ...m, steering: m.steering.map(entry => entry.id === id ? { ...entry, state: 'applied' as const } : entry) } : m) }));
         } else if (type === 'queued-message') {
           applyQueueFrame(sessionId, frame.queue);
           const sent = frame.message as { text?: unknown } | undefined;
@@ -2200,6 +2224,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           patchAssistant((m) => ({
             ...m,
             streaming: false,
+            steering: m.steering?.map(entry => entry.state === 'accepted' || entry.state === 'sending' ? { ...entry, state: 'missed' as const } : entry),
             drafts: undefined,
             durationMs: Number(frame.durationMs ?? performance.now() - started),
             tokens: typeof frame.tokensOut === 'number' ? frame.tokensOut : undefined,
@@ -2210,6 +2235,7 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
             tps: typeof frame.tps === 'number' ? frame.tps : m.tps,
             promptTps: typeof frame.promptTps === 'number' ? frame.promptTps : m.promptTps,
           }));
+          patchSession(sessionId, sess => ({ ...sess, messages: sess.messages.map(m => m.steering?.some(entry => entry.state === 'accepted' || entry.state === 'sending') ? { ...m, steering: m.steering.map(entry => entry.state === 'accepted' || entry.state === 'sending' ? { ...entry, state: 'missed' as const } : entry) } : m) }));
           // The final text is in `state`: write it once now instead of waiting for the coalescing timer.
           flushSessions();
         }

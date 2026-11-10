@@ -322,6 +322,8 @@ export interface MonitorState {
 }
 
 export interface ChatMessage {
+  /** Instructions delivered into this reply while the agent was still working. */
+  steering?: { id: string; text: string; at: string; state?: 'sending' | 'accepted' | 'applied' | 'missed' }[];
   /** Tool calls the model is writing right now (a file, a command): live data for the writing card; see ToolDraft. */
   drafts?: ToolDraft[];
   /** The person's message is written with Markdown (a task handover: bold headings and lists), so the bubble draws it as such. */

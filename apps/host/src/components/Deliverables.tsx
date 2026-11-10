@@ -116,7 +116,7 @@ export function ActivityLine({ group, sessionId, onPreview }: { group: ActivityG
   const live = !group.closed;
   return <><div className="act" data-open={open || undefined} data-live={live || undefined}>
     <button type="button" className="act__line" aria-expanded={open} disabled={!group.files.length} onClick={() => setOpen(v => !v)}>
-      <span>{live && group.live?.label ? group.live.label : sentence}</span>{live && group.live?.bytes ? <span className="act__meta">{draftSize(group.live.bytes)}{group.live.lines && group.live.lines > 1 ? <> {"\u00B7"} {tr("{0} lines", [group.live.lines])}</> : null}</span> : null}{group.added || group.removed ? <Plusminus added={group.added} removed={group.removed}/> : null}
+      <span>{live && group.live?.label ? group.live.label : sentence}</span>{group.toolNames?.length ? <span className="act__tools" title={tr('Tools used')}>{group.toolNames.join(', ')}</span> : null}{live && group.live?.bytes ? <span className="act__meta">{draftSize(group.live.bytes)}{group.live.lines && group.live.lines > 1 ? <> {"\u00B7"} {tr("{0} lines", [group.live.lines])}</> : null}</span> : null}{group.added || group.removed ? <Plusminus added={group.added} removed={group.removed}/> : null}
       {group.files.length ? <Icon name="chevron" size={14} className="act__chev"/> : null}
       {!group.closed ? <span className="act__live" aria-hidden="true"/> : null}
     </button>

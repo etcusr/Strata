@@ -17,7 +17,7 @@ import { materializeSkills, parseSkillFile, skillSlug, writeCreatedSkill } from 
 import { systemFonts } from './fonts.mjs';
 import { tuningDir } from './platform-paths.mjs';
 import { createAgentBridge, plainTurnFailure } from './agent/agent-bridge.mjs';
-import { mcpSkippedNotices } from './agent/profile.mjs';
+import { agentLocalContext, mcpSkippedNotices } from './agent/profile.mjs';
 import { createAgentTools } from './agent/tools-settings.mjs';
 import { withPlainStatus } from './agent/status.mjs';
 import { findBrowser, findPlaywrightMcp } from './agent/browser-probe.mjs';
@@ -204,7 +204,7 @@ const agent = createAgentBridge({
   proxyBase: `http://127.0.0.1:${PORT}/api/internal/agent-llm`,
   expertSampling: () => samplingFromExpert(store.get().expert),
   // How far a local engine has got (the 2 s /metrics poll), for the agent's stall watchdog: it moves while a long prompt is read.
-  engineProgress: instanceId => engineProgressMark(native.readyInstances().find(i => i.id === instanceId)),
+  engineProgress: (instanceId, sinceMs) => engineProgressMark(native.readyInstances().find(i => i.id === instanceId), sinceMs),
   onPlan: (chatId, event, plan) => hub.send('plan', { chatId, event, plan }),
   onQueue: (chatId, queue) => hub.send('queue', { chatId, queue }),
   dataDir: store.DATA_DIR,
@@ -214,7 +214,7 @@ const agent = createAgentBridge({
   defaultLocalId: () => native.defaultInstanceId(),
   localInstances: () => native.readyInstances().map(i => ({
     id: i.id, label: i.label, baseUrl: `http://127.0.0.1:${i.port}/v1`, modelId: i.apiModelId,
-    context: i.metrics?.engine?.max_context ?? i.context ?? undefined, key: i.key, vision: i.vision,
+    context: agentLocalContext(i.metrics?.engine?.max_context ?? i.context), key: i.key, vision: i.vision,
     // The engine's request slots: helper agents never outnumber them.
     slots: i.metrics?.live?.slots?.length || i.parallel || 1,
     // The tool servers set up for this model (Settings, Tools): the agent connects to the same ones.
@@ -1967,6 +1967,11 @@ async function api(req, res, path, method, url) {
     catch (e) { return error(res, e.code === 'plan-gone' || e.code === 'plan-used' ? 409 : 400, e.message); }
   }
   // Messages typed while a goal runs: queued (shown as queued), taken back, or listed.
+  if (path === '/api/chat/steer' && method === 'POST') {
+    const body = await readBody(req);
+    try { return json(res, 200, await agent.steerMessage({ chatId: String(body.sessionId ?? ''), text: body.message, requestId: body.requestId })); }
+    catch (e) { return error(res, e.code === 'steer-idle' || e.code === 'steer-refused' ? 409 : 400, e.message); }
+  }
   if (path === '/api/chat/queue' && method === 'GET') return json(res, 200, agent.takeQueue(url.searchParams.get('sessionId') ?? '', { release: url.searchParams.get('release') === '1' }));
   if (path === '/api/chat/queue' && method === 'POST') {
     const body = await readBody(req);

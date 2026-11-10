@@ -315,6 +315,9 @@ RATE_MIN_SPAN_S = 0.25      # younger than this there is no rate yet: the mean s
 # server (the engine's main thread waits, untimed, for its next command): the engine is ended and the request fails;
 # the next request starts it again.  The config's "engine_silence_s" sets it (0: wait forever, as before).
 ENGINE_SILENCE_S = 300.0
+# A cancelled request must release the engine's request FIFO promptly. If STOP is not acknowledged, restart the engine
+# instead of letting the next chat wait for the normal five-minute silence allowance.
+STOP_ACK_TIMEOUT_S = 30.0
 # #4271: a streaming client that stops reading (a hung process, a network that dropped) leaves the thread that writes to
 # it blocked once the socket buffers are full - and that thread holds the engine's turn.  A write that makes no progress
 # for this long ends the request as a disconnect (the engine is stopped, the turn given back).  0: no limit, as before.
@@ -2885,12 +2888,14 @@ class StrataEngine:
                         self.proc.stdin.flush()
                     except OSError:
                         pass
+                drain_allow = allow
+                if self.can_stop:
+                    drain_allow = min(allow, STOP_ACK_TIMEOUT_S) if allow > 0 else STOP_ACK_TIMEOUT_S
                 # #481: never an untimed wait here - it holds the request FIFO, and an engine that lost step never
-                # answers.  An engine that honours STOP gets the current allowance in all (a STOP during a prompt
-                # chunk is seen after it); an older one runs on to max_new, so each line only has to come in time.
+                # answers. A STOP that is not acknowledged soon ends the engine and lets the next request restart it.
                 heard = time.monotonic()
                 while True:
-                    left = allow - (time.monotonic() - heard) if allow > 0 else None
+                    left = drain_allow - (time.monotonic() - heard) if drain_allow > 0 else None
                     try:
                         if carry is not NO_LINE:          # read already, after the last token
                             line, carry = carry, NO_LINE
@@ -2900,7 +2905,7 @@ class StrataEngine:
                             line = lines_q.get(timeout=left)
                     except queue.Empty:
                         raise self._silent("the engine did not finish the request after it was stopped (STOP) "
-                                           f"within {allow:.0f} s") from None
+                                           f"within {drain_allow:.0f} s") from None
                     if line is None or line.startswith("ERR"):
                         break
                     if line.startswith("DONE"):

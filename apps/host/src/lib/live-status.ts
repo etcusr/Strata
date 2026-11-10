@@ -51,25 +51,43 @@ export function useLiveStatus(sessionId: string | null | undefined): StatusFrame
   );
 }
 
-/** The playful words shown while the model is thinking, in the order they rotate. Translated through the catalog. */
-export const PLAYFUL_VERBS = [
-  'Thinking…', 'Pondering…', 'Cooking up an answer…', 'Mulling it over…', 'Connecting the dots…', 'Chasing an idea…',
-  'Sketching it out…', 'Weighing the options…', 'Reading between the lines…', 'Brewing a reply…', 'Putting it together…', 'Following a hunch…',
-] as const;
-
-/** Phases where the model is working things out and nothing concrete can be named: the playful words rotate here and only here. */
-export function isPlayful(frame: StatusFrame): boolean {
-  return frame.phase === 'thinking' || (frame.phase === 'waiting' && frame.code === 'model-working');
+/** Only engine facts from the local model are used here; a cloud model has no local prompt progress. */
+export interface PromptActivity {
+  phase: string;
+  prompt?: { done: number; total: number };
+  generated?: number;
 }
 
-/** The words for a frame. `rotation` counts how many times the playful word has advanced (the page advances it every few seconds). */
-export function statusWords(frame: StatusFrame, rotation = 0): string {
-  if (isPlayful(frame)) return tr(PLAYFUL_VERBS[((rotation % PLAYFUL_VERBS.length) + PLAYFUL_VERBS.length) % PLAYFUL_VERBS.length]);
+/** The native monitor is shared by all chats. Show its progress only for a request started by this turn. */
+export function nativeActivityForTurn(metrics: { time?: number; live?: Record<string, unknown> } | null | undefined, startedAt: number): PromptActivity | null {
+  const live = metrics?.live;
+  if (!live || !['reading', 'generating'].includes(String(live.state))) return null;
+  const elapsed = Number(live.elapsed_s), sampled = Number(metrics?.time);
+  if (!Number.isFinite(elapsed) || !Number.isFinite(sampled)) return null;
+  if (sampled * 1000 - elapsed * 1000 < startedAt - 5000) return { phase: 'busy-other' };
+  return { phase: String(live.state), prompt: { done: Number(live.prompt_read) || 0, total: Number(live.prompt_total) || 0 }, generated: Number(live.generated) || 0 };
+}
+
+/** Describe observed work. Never rotate invented descriptions while a model request is running. */
+export function statusWords(frame: StatusFrame, engine?: PromptActivity | null): string {
+  if (['starting', 'waiting', 'thinking'].includes(frame.phase) && engine?.phase === 'busy-other') return tr('Local model busy with another request…');
+  if (['starting', 'waiting', 'thinking'].includes(frame.phase) && engine?.phase === 'reading') {
+    const done = Number(engine.prompt?.done), total = Number(engine.prompt?.total);
+    if (Number.isFinite(done) && Number.isFinite(total) && total > 0)
+      return `${tr('Reading prompt')} · ${Math.min(total, Math.max(0, Math.round(done))).toLocaleString()} / ${Math.round(total).toLocaleString()} ${tr('tokens')}`;
+    return `${tr('Reading prompt')}…`;
+  }
+  if (['starting', 'waiting', 'thinking'].includes(frame.phase) && engine?.phase === 'generating') {
+    const generated = Number(engine.generated);
+    return Number.isFinite(generated) && generated > 0 ? `${tr('Generating model output…')} · ${Math.round(generated).toLocaleString()} ${tr('tokens')}` : tr('Generating model output…');
+  }
+  if (frame.phase === 'thinking') return tr('Generating reasoning…');
   const a = frame.args ?? {};
   const target = typeof a.target === 'string' && a.target ? a.target : '';
   switch (frame.code) {
     case 'starting': return tr('Starting…');
     case 'reading-prompt': return tr('Reading your message…');
+    case 'model-working': return tr('Waiting for model output…');
     case 'answering': return tr('Writing the answer…');
     case 'preparing-tool': case 'tool': {
       const verb = typeof a.verb === 'string' && a.verb ? tr(a.verb) : '';

@@ -18,6 +18,7 @@
  */
 import { replyCap } from '../reply-cut.mjs';
 import { densityOf, estimateMessage, estimateTools, isContextOverflow, MAX_DENSITY, pressureNow, promptTokensOf, splitMessages, summaryBudget, usageOfEvent, WINDOW_SLACK, withSummaryLanguage } from '../context-budget.mjs';
+import { filteredHeader } from './strata-on-demand-tools.mjs';
 
 export const name = 'strata-context';
 
@@ -32,20 +33,24 @@ const wrapped = new WeakSet();
 /** Densities that made a summary request fail on this server, per session id (the next request starts from a more careful one). */
 const careful = new Map();
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   const meter = ctx.tokenMeter;
   const llm = ctx.llm;
   const log = (level, text) => { try { ctx.logger?.[level]?.(`strata-context: ${text}`); } catch { /* logging never blocks */ } };
+  const offeredHeader = (session, header) => config.onDemandTools
+    ? filteredHeader(session.id, header ?? session.requestHeader?.())
+    : header;
 
   // 1. The measured size of the prompt, from the model server's own report for each answer.
   if (meter && typeof meter.measure === 'function' && !wrapped.has(meter)) {
     wrapped.add(meter);
     const original = meter.measure;
     meter.measure = function measure(session, requestHeader) {
-      const m = original.call(this, session, requestHeader);
+      const offered = offeredHeader(session, requestHeader);
+      const m = original.call(this, session, offered);
       const sample = samples.get(session);
       if (!sample) return m;
-      const now = m.surfaceTokens + estimateTools(requestHeader ?? session.requestHeader?.());
+      const now = m.surfaceTokens + estimateTools(offered ?? session.requestHeader?.());
       const total = Math.max(m.totalTokens, pressureNow({ sample, now }));
       if (total <= m.totalTokens) return m;
       const density = densityOf(sample.real, sample.estimated);
@@ -57,9 +62,10 @@ export function apply(ctx) {
       if (!(real > 0)) return;
       try {
         // The request that was just answered saw the conversation without this answer: its price is the surface before the answer's node.
-        const m = original.call(meter, session);
+        const offered = offeredHeader(session);
+        const m = original.call(meter, session, offered);
         const heuristic = m.nodes.reduce((n, x) => n + (x.seq === event.seq ? 0 : x.heuristicTokens), 0);
-        const estimated = heuristic + estimateTools(session.requestHeader?.());
+        const estimated = heuristic + estimateTools(offered ?? session.requestHeader?.());
         if (!(estimated > 0)) return;
         const sample = { real, estimated };
         samples.set(session, sample);
@@ -79,9 +85,9 @@ export function apply(ctx) {
   }
 
   // 3. A reply that has room to finish (AGENT-LOST, 11-01). The output budget in the profile is what the Harness's compaction sets aside for a
-  // reply (30 percent of the window; it reads it from the request header), and the same number was also the ceiling of every request: a thinking
+  // reply (20 percent of the window; it reads it from the request header), and the same number was also the ceiling of every request: a thinking
   // model that wrote a 15K-token file after 9K tokens of thinking was cut inside the tool call at 19,660, the unfinished call was dropped and the
-  // turn ended with no file and no word. The header (and so compaction) stays as it is; the request that goes to the model server may produce up
+  // turn ended with no file and no word. The request that goes to the model server may produce up
   // to half the window, at most 64K tokens (replyCap), and pi-ai still clamps it to what the window has left after the prompt. The agent loop
   // dispatches through the adapter's `streamWithSnapshot`, after the loop has checked the request against its header, so that is where the ceiling
   // is raised, once per adapter, the first time a local route is prepared. A Harness that renames it leaves the ceiling as it was (the test that
@@ -109,7 +115,7 @@ export function apply(ctx) {
           const model = this.modelOf(snapshot, options.provider, options.model);
           const asked = options.maxTokens ?? model.maxTokens ?? 0;
           // Only the agent's own reply budget is raised: a summary or a title asks for far less and keeps what it asked.
-          if (model.contextWindow > 0 && asked >= Math.floor(model.contextWindow * 0.25)) {
+          if (options?.purpose !== 'compaction' && model.contextWindow > 0 && asked >= model.maxTokens) {
             const cap = replyCap(model.contextWindow, asked);
             if (cap > asked) next = { ...options, maxTokens: cap };
           }
@@ -153,7 +159,7 @@ export function apply(ctx) {
   const refusedForSize = finish => finish?.kind === 'error' && isContextOverflow(finish.failure ?? finish);
 
   async function* summaryStream(options, original) {
-    options = { ...options, messages: withSummaryLanguage(options.messages) };   // #4750: the summary follows the conversation's language
+    options = { ...options, messages: withSummaryLanguage(options.messages), ...(isLocalRoute(options.provider) ? { reasoningEffort: 'off' } : {}) };   // A local checkpoint uses its output budget for the summary itself.
     let window = 0;
     try { window = (await llm.resolveModelInfo(options.provider, options.model, options.signal))?.context?.contextWindow ?? 0; } catch { window = 0; }
     const messages = options.messages ?? [];

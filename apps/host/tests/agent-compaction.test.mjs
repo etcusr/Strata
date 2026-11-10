@@ -7,22 +7,21 @@ import { join } from 'node:path';
 import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
-import { buildProfile, compactionHeadroom, localOutputBudget } from '../server/agent/profile.mjs';
+import { buildProfile, localCompactionHeadroom, compactionOutputBudget, localOutputBudget, LOCAL_COMPACTION_FRACTION } from '../server/agent/profile.mjs';
 
 const HARNESS = process.env.STRATA_HARNESS_DIR;
 const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARNESS_DIR is not set to a built Harness' : false;
 
-test('the reply keeps 30 percent of the window (at most 32K) and compaction gets a headroom that fits, for every window size', () => {
-  assert.equal(localOutputBudget(32768), 9830); assert.equal(localOutputBudget(262144), 32768); assert.equal(localOutputBudget(8192), 4096); assert.equal(localOutputBudget(undefined), 9830);
+test('local compaction starts at 75 percent of the selected context window', () => {
+  assert.equal(localOutputBudget(32768), 6553); assert.equal(localOutputBudget(262144), 32768); assert.equal(localOutputBudget(8192), 1638); assert.equal(localOutputBudget(undefined), 6553);
+  assert.equal(compactionOutputBudget(32768), 6553);
   for (const w of [8192, 16384, 32768, 65536, 131072, 262144, 1_000_000]) {
-    const out = localOutputBudget(w), head = compactionHeadroom(w, out);
-    const threshold = Math.floor(Math.min(w * 0.8, w - out - head));
-    assert.ok(threshold > 0, `window ${w}: a positive start point (${threshold})`);
-    assert.ok(threshold >= (w - out) * 0.5, `window ${w}: compaction starts after at least half of the room the conversation has (${threshold})`);
-    assert.ok(Math.floor((w - out) * 0.16) < threshold, `window ${w}: the verbatim tail is smaller than the start point`);
+    const out = localOutputBudget(w), head = localCompactionHeadroom(w);
+    const threshold = Math.floor(Math.min(w * LOCAL_COMPACTION_FRACTION, w - out - head));
+    assert.equal(threshold, Math.floor(w * 0.75), `window ${w}: the configured percentage determines the threshold`);
   }
   const profile = buildProfile({ local: [{ id: 'a', modelId: 'm', baseUrl: 'http://x', context: 32768 }], connections: [] });
-  assert.match(profile.patch, /"modelPolicies": \[\s*\{\s*"provider": "strata-local",\s*"model": "m",\s*"headroomTokens": 2867/);
+  assert.match(profile.patch, /"modelPolicies": \[\s*\{\s*"provider": "strata-local",\s*"model": "m",\s*"thresholdRatio": 0\.75,\s*"headroomTokens": 1310,\s*"maxTokens": 6553/);
 });
 
 test('a long chat on a small window compacts before it overflows, and the conversation goes on', { skip }, async (t) => {
@@ -43,6 +42,7 @@ test('a long chat on a small window compacts before it overflows, and the conver
   const reqs = worker.requests;
   const summaries = reqs.filter(r => r.summary);
   assert.ok(summaries.length >= 1, 'the Harness asked for a summary of the old history');
+  assert.ok(summaries.every(r => r.params?.chat_template_kwargs?.enable_thinking === false), 'local checkpoints do not spend their token cap on reasoning');
   const answers = reqs.filter(r => !r.summary && r.toolNames.length);
   const peak = Math.max(...answers.map(r => r.promptChars));
   assert.ok(peak < 16384 * 4, `no request was bigger than the window (about ${Math.round(peak / 4)} tokens of 16384)`);

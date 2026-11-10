@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
 import { resolveHarness } from '../server/agent/harness-runtime.mjs';
-import { buildProfile } from '../server/agent/profile.mjs';
+import { agentLocalContext, buildProfile } from '../server/agent/profile.mjs';
 import { clipMessage, densityOf, estimateMessage, isContextOverflow, pressureNow, promptTokensOf, splitMessages, summaryBudget, usageOfEvent, SUMMARY_LANGUAGE_RULE, withSummaryLanguage } from '../server/agent/context-budget.mjs';
 
 const HARNESS = process.env.STRATA_HARNESS_DIR;
@@ -19,6 +19,13 @@ test('the profile loads the context plugin, so compaction and /compact read the 
   const profile = buildProfile({ local: [{ id: 'a', modelId: 'm', baseUrl: 'http://x', context: 65536 }], connections: [] });
   assert.match(profile.patch, /"id": "strata-context"/);
   assert.match(profile.patch, /strata-context\.mjs/);
+});
+
+test('a local agent uses the loaded engine\'s full context window', () => {
+  assert.equal(agentLocalContext(262144), 262144);
+  assert.equal(agentLocalContext(16384), 16384);
+  assert.equal(agentLocalContext(undefined), 32768);
+  assert.match(readFileSync(new URL('../server/index.mjs', import.meta.url), 'utf8'), /context: agentLocalContext\(i\.metrics\?\.engine\?\.max_context/);
 });
 
 test('density: the engine said 59,048 tokens for a prompt the Harness priced at 31,794', () => {
@@ -40,13 +47,12 @@ test('pressure: the measured part is exact, what came after is priced at the mea
   assert.equal(pressureNow({ sample: { real: 100, estimated: 5000 }, now: 5000 }), 5000, 'never below the Harness price');
 });
 
-test('the compaction threshold on a 64K window leaves room for the reply even when the prompt is measured in real tokens', () => {
-  // Gyro-S at 64K: the reply keeps 19,660 tokens and compaction keeps 5,734 of headroom (profile.mjs), so it starts at 40,142 REAL tokens.
-  const window = 65536, reply = 19660, headroom = 5734;
-  const threshold = Math.floor(Math.min(window * 0.8, window - reply - headroom));
-  assert.equal(threshold, 40142);
+test('the compaction threshold on a 64K window is 75 percent and leaves room for the reply', () => {
+  const window = 65536, reply = 13107, headroom = 2621;
+  const threshold = Math.floor(Math.min(window * 0.75, window - reply - headroom));
+  assert.equal(threshold, 49152);
   assert.ok(threshold + reply < window, 'the prompt at the threshold plus a full reply still fits');
-  // The 2026-10-22 chat: 31,794 priced = 59,048 real. It is over the threshold now (before: under it, and the engine refused the next request).
+  // The 2026-10-22 chat: 31,794 priced = 59,048 real. It is over the threshold now.
   assert.ok(pressureNow({ sample: { real: 59048, estimated: 31794 }, now: 31794 }) > threshold);
 });
 
@@ -163,8 +169,8 @@ test('fit: a message that fits is sent, one that fits after a summary is summari
 });
 
 test('fit: a big message on a chat already near the compaction threshold summarises first, so the window is never come close to', () => {
-  // 64K window: the Harness starts summarising at 40,142 (profile.mjs), but looks only before its NEXT step; a message that arrives now is not in that count.
-  const at = { window: 65536, threshold: 40142, messageTokens: 14400 };
+  // 64K window: the Harness starts summarising at 49,152 (profile.mjs), but looks only before its NEXT step.
+  const at = { window: 65536, threshold: 49152, messageTokens: 14400 };
   const near = decideFit({ ...at, pressure: 39840 });
   assert.equal(near.action, 'summarize'); assert.equal(near.why, 'threshold');
   assert.equal(decideFit({ ...at, pressure: 15000 }).action, 'send', 'still under the threshold with the message on top');

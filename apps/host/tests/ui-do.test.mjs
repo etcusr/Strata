@@ -329,14 +329,27 @@ test('#4749 the helper strings are translated', async () => {
 });
 
 // ---------------------------------------------------------------------------------------------------------------------- #4783
-test('#4783 the three choices while an answer is written, as the web chat page has them, and only those three are valid', async () => {
+test('#4783 the choices while an answer is written include steering the active task', async () => {
   const { busyPlan, validWhileBusy, WHILE_BUSY } = await load('lib/while-busy.ts');
-  assert.deepEqual([...WHILE_BUSY], ['wait', 'queue', 'interject']);
+  assert.deepEqual([...WHILE_BUSY], ['wait', 'queue', 'interject', 'steer']);
   assert.equal(busyPlan('wait'), 'refuse');
   assert.equal(busyPlan('queue'), 'goal', 'a running goal has its own queue in the host; with none, the message is parked');
   assert.equal(busyPlan('interject'), 'interrupt');
+  assert.equal(busyPlan('steer'), 'steer');
   assert.equal(validWhileBusy('queue'), true);
-  for (const bad of ['', 'steer', 'QUEUE', null, undefined, 3]) assert.equal(validWhileBusy(bad), false, String(bad));
+  for (const bad of ['', 'QUEUE', null, undefined, 3]) assert.equal(validWhileBusy(bad), false, String(bad));
+});
+
+test('an instruction is admitted into the live agent turn as steer, without Stop or a new turn', () => {
+  const bridge = src('../server/agent/agent-bridge.mjs');
+  const host = src('../server/index.mjs');
+  const chat = src('screens/Chat.tsx');
+  assert.match(bridge, /async function steerMessage\(/);
+  assert.match(bridge, /mode: 'steer', content: \[\{ type: 'text', text: clean \}\]/);
+  assert.match(bridge, /type: 'steer-applied', requestId: id/);
+  assert.match(host, /path === '\/api\/chat\/steer'/);
+  assert.match(chat, /steerCurrentTurn\(session\.id, out\)/);
+  assert.match(chat, /onClick=\{onSteer\}/);
 });
 
 test('#4783 the composer acts on the choice, the default keeps today\'s behaviour, and the parked message is sent when the chat is quiet', () => {
@@ -353,7 +366,7 @@ test('#4783 the composer acts on the choice, the default keeps today\'s behaviou
 
 test('#4783 the new sentences are translated', async () => {
   const { tr, setTranslationLanguage } = await withI18n('approvals.ts');
-  const lines = ['While an answer is being written', 'What Enter does when you send a message while the assistant is still answering.', 'Wait for the answer', 'Send after the answer', 'Interrupt the answer', 'Enter sends it when the answer is done.', 'Enter stops the answer here and sends it now.', 'Waiting to send', 'Take back'];
+  const lines = ['While an answer is being written', 'What Enter does when you send a message while the assistant is still answering.', 'Wait for the answer', 'Send after the answer', 'Interrupt the answer', 'Enter sends it when the answer is done.', 'Enter stops the answer here and sends it now.', 'Waiting to send', 'Take back', 'Add to the current task', 'Add to task', 'Enter adds it to the current task without stopping it.', 'Added while working', 'The message could not be added to the task', 'Sending update…', 'Update received. The agent will use it on the next step.', 'The agent is working with this update.', 'The task ended before this update was applied.'];
   for (const l of languages.slice(1)) { setTranslationLanguage(l); for (const text of lines) assert.notEqual(tr(text), text, `${l}: ${text}`); }
   setTranslationLanguage('en');
 });

@@ -22,7 +22,7 @@ import { randomUUID } from 'node:crypto';
 import { GatewayClient } from './gateway-client.mjs';
 import { HarnessProcess, resolveHarness, redact, stopStaleAgent } from './harness-runtime.mjs';
 import { StatusReporter } from './status.mjs';
-import { buildProfile, routeFor, MODE_PRESETS, modeOf, effortOf, localOutputBudget, compactionHeadroom } from './profile.mjs';
+import { buildProfile, routeFor, MODE_PRESETS, modeOf, effortOf, localOutputBudget, localCompactionHeadroom, LOCAL_COMPACTION_FRACTION } from './profile.mjs';
 import { TurnProjector, parseArguments as parseArgs } from './events.mjs';
 import { ChildProjector } from './children.mjs';
 import { nearestBudget } from './llm-shape.mjs';
@@ -106,6 +106,7 @@ export function imageParts(images) {
 
 /** A timer that never keeps the process alive by itself. */
 const after = (ms, fn) => { const t = setTimeout(fn, ms); t.unref?.(); return t; };
+const projectorHasLiveTool = p => p.composing.size > 0 || [...p.tools.values()].some(entry => ['running', 'proposed'].includes(entry.card?.state));
 /** The app's own host folder: never a place an answer's files can be (this file lives in <host>/server/agent). */
 const HOST_DIR = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -466,6 +467,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       children: new Map(), subagentCalls: new Map(), parentOpen: false, stopping: false, settleTimer: null, mode: appliedMode,
       plan: null, advancing: false, goalRun: false, lastActivity: Date.now(), heard: Date.now(), engineMark: null, watchdog: null,
       research: researchTopic ? { phase: 'gather', nudged: false, waitingStart: false } : null,
+      steering: new Map(), modelAttempt: null, rapidSteer: false,
+      cutRecovery: null, cutSilentRetries: 0,
     };
     c.turn = turn;
     if (workspacePath) folderClaims.begin(workspacePath, chatId);
@@ -481,6 +484,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       raw({ type: 'resync', content: hideDeltas ? '' : written.all, reasoning: written.reasoning });
       for (const t of projector.tools.values()) if (t.card) raw({ type: 'agent-tool', tool: t.card });
       for (const q of questions.values()) if (q.sessionId === sessionId) raw({ type: 'agent-question', callId: q.callId, questions: q.items });
+      for (const [id, update] of turn.steering) if (update.applied) raw({ type: 'steer-applied', requestId: id });
     };
     /**
      * A turn must always end. If the Harness sends nothing at all for a while (a tool that never returns, a model server that went
@@ -493,9 +497,10 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       const limit = toolRunning ? stallToolMs : stallMs;
       // A local engine reading a long prompt sends the Harness nothing for minutes (#3623). Its /metrics progress counts as activity,
       // for at most engineGraceMs after the Harness last spoke: progress for another chat cannot keep a lost turn alive forever.
-      if (turn.route?.kind === 'local' && Date.now() - turn.heard < engineGraceMs) {
+      const localContenders = turn.route?.kind === 'local' ? [...chats.values()].filter(c => c.turn && !c.turn.finished && c.turn.route?.instanceId === turn.route.instanceId).length : 0;
+      if (turn.route?.kind === 'local' && localContenders === 1 && Date.now() - turn.heard < engineGraceMs) {
         let mark = null;
-        try { mark = engineProgress(turn.route.instanceId); } catch { /* no progress known: the Harness alone decides */ }
+        try { mark = engineProgress(turn.route.instanceId, projector.startedAt); } catch { /* no progress known: the Harness alone decides */ }
         if (mark != null && mark !== turn.engineMark) { turn.engineMark = mark; turn.lastActivity = Date.now(); return; }
       }
       if (Date.now() - turn.lastActivity < limit) return;
@@ -595,7 +600,22 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           return;
         }
       } else if (!turn.live) return;
-      for (const f of projector.consume(item)) emit(f);
+      if (item.type === 'assistant-stream') {
+        if (item.frame?.type === 'start') turn.modelAttempt = item.frame.attemptId;
+        else if (item.frame?.type === 'end' && turn.modelAttempt === item.frame.attemptId) turn.modelAttempt = null;
+      }
+      for (const f of projector.consume(item)) {
+        if (turn.cutRecovery?.started && f.type === 'delta' && !f.own && String(f.text ?? '').trim()) turn.cutRecovery.answered = true;
+        emit(f);
+      }
+      if (item.type === 'event' && item.event.type === 'user/message') {
+        const id = item.event.data?.source?.rpcId;
+        const update = turn.steering.get(id);
+        if (update && !update.applied) {
+          update.applied = true;
+          emit({ type: 'steer-applied', requestId: id });
+        }
+      }
       if (guard && projector.contextTokens != null) trip(guard.context(projector.contextTokens));
       if (item.type === 'event') watchParent(item.event);
     }
@@ -653,6 +673,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           turn.parentOpen = true;
           if (turn.research) turn.research.waitingStart = false;
           turn.cutWaiting = false;
+          if (turn.cutRecovery) turn.cutRecovery.started = true;
           clearTimeout(turn.settleTimer);
           // After Stop, a helper's report would start a new turn that nobody asked for.
           if (turn.stopping) void runtime.gw.rpc('session/cancel', { request: { sessionId } }).catch(() => {});
@@ -796,6 +817,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       if (turn.finished) return;
       turn.settleTimer = after(turn.stopping ? 1200 : turn.children.size ? 600 : 0, async () => {
         if (turn.finished || turn.parentOpen || turn.advancing) return;
+        if (turn.rapidSteer) { turn.settleTimer = after(300, armSettle); return; }
         const open = [...turn.children.values()];
         if (open.some(c => !c.done)) return;
         if (!turn.stopping) {
@@ -806,6 +828,20 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
           if (current && current.phase === 'active' && current.activation === 'armed') { turn.settleTimer = after(700, armSettle); return; }
           // A reply the length limit cut (AGENT-LOST): the agent lost what it was writing. Say so in the chat and ask it to carry on in smaller pieces, twice at most.
           if (turn.cutWaiting) { turn.settleTimer = after(300, armSettle); return; }
+          // Some models answer the carry-on prompt with reasoning only and then stop. That is a completed
+          // Harness turn, but it is not a continuation the person can use. Ask once more for a short answer.
+          if (turn.cutRecovery?.started && !turn.cutRecovery.answered && projector.ended?.kind === 'completed') {
+            if (turn.cutSilentRetries < 1) {
+              turn.cutSilentRetries += 1;
+              turn.cutWaiting = true;
+              turn.cutRecovery = { started: false, answered: false };
+              try { await runtime.gw.rpc('session/prompt', { request: { requestId: `cut-answer-${randomUUID()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: 'Your continuation ended without a visible answer. The work already done is kept. Check the current state if needed, then give the user a concise result or say what remains to do. Keep your thinking short and do not repeat completed actions.' }] } }); }
+              catch { turn.cutWaiting = false; finishTurn(null); return; }
+              turn.settleTimer = after(500, armSettle);
+              return;
+            }
+            turn.guard ??= 'empty';
+          }
           if (projector.ended?.kind === 'max-tokens' && !turn.goalRun && !turn.stopping && (turn.cuts ?? 0) < MAX_CUT_RETRIES) {
             const cut = projector.cut();
             turn.cuts = (turn.cuts ?? 0) + 1;
@@ -817,6 +853,7 @@ ${note.text}
 `, key: note.key, values: note.values, noteReason: 'cut' });
             for (const f of projector.clearCut()) emit(f);
             turn.cutWaiting = true;
+            turn.cutRecovery = { started: false, answered: false };
             try { await runtime.gw.rpc('session/prompt', { request: { requestId: `cut-${randomUUID()}`, sessionId, mode: 'queue', content: [{ type: 'text', text: cutNudge(cut) }] } }); }
             catch { turn.cutWaiting = false; finishTurn(null); return; }
             turn.settleTimer = after(500, armSettle);
@@ -1210,6 +1247,43 @@ ${note.text}
 
   // -- messages typed while a goal runs ----------------------------------------------------------------------
 
+  /** Deliver a new instruction to the current agent turn at its next step. The Harness keeps the turn running. */
+  async function steerMessage({ chatId, text, requestId: clientRequestId }) {
+    const turn = chats.get(chatId)?.turn;
+    if (!turn || turn.finished || turn.stopping || !turn.prompted || !rt)
+      throw new AgentUnavailable('This chat has no active agent task to update. Send the message as usual.', 'steer-idle');
+    const clean = String(text ?? '').trim();
+    if (!clean || clean.length > 8000)
+      throw new AgentUnavailable('Write a message of up to 8,000 characters.', 'steer-invalid');
+    const requestId = typeof clientRequestId === 'string' && /^steer-[0-9a-f-]{36}$/i.test(clientRequestId) ? clientRequestId : `steer-${randomUUID()}`;
+    if (turn.steering.has(requestId)) throw new AgentUnavailable('This update was already sent.', 'steer-invalid');
+    const update = { applied: false };
+    turn.steering.set(requestId, update);
+    // A model that is still writing can take many seconds to finish its step. Cancel only that in-flight
+    // answer and let the Harness resume from its retained inbox. A running tool, helper, goal or research
+    // round keeps the ordinary next-step delivery: cancelling one of those could discard useful work.
+    const canRapid = !!turn.modelAttempt && !turn.rapidSteer && !turn.goalRun && !turn.research &&
+      !turn.children.size && !turn.advancing && !projectorHasLiveTool(turn.projector);
+    let rapid = false;
+    let ownsRapid = false;
+    try {
+      if (canRapid) {
+        turn.rapidSteer = true;
+        ownsRapid = true;
+        try { await rt.gw.rpc('session/cancel', { request: { sessionId: turn.sessionId } }); rapid = true; }
+        catch { /* If the request already ended, still deliver the update at its next step. */ }
+      }
+      if (turn.finished || turn.stopping) throw new Error('The task finished before the update could be delivered.');
+      await rt.gw.rpc('session/prompt', { request: { requestId, sessionId: turn.sessionId, mode: 'steer', content: [{ type: 'text', text: clean }] } });
+      return { ok: true, requestId, applied: update.applied, rapid };
+    } catch (e) {
+      turn.steering.delete(requestId);
+      throw new AgentUnavailable('The current task could not take that message. Try again while it is running.', 'steer-refused', e.message);
+    } finally {
+      if (ownsRapid) turn.rapidSteer = false;
+    }
+  }
+
   /** Queue a message for the running goal. It is delivered between steps, or handed back to the page when the goal ends or pauses. */
   function queueMessage({ chatId, text }) {
     const turn = chats.get(chatId)?.turn;
@@ -1319,16 +1393,15 @@ ${note.text}
     const inst = localInstances().find(i => i.id === route.instanceId);
     if (!inst || !(route.contextWindow > 0)) return null;
     const carried = fresh && history.length ? withEarlierConversation(history, message) : message;
-    if (carried.length < COUNT_ABOVE_CHARS) return null;
     const count = text => countTokens({ baseUrl: inst.baseUrl, key: inst.key, model: inst.modelId, text });
-    let tokens = await count(carried);
+    let tokens = carried.length < COUNT_ABOVE_CHARS ? Math.ceil(carried.length / 3) : await count(carried);
     if (tokens == null) return null;
     const now = fresh ? null : await contextOf(runtime, sessionId);
-    const window = now?.window || route.contextWindow;
+    const window = Math.min(now?.window || route.contextWindow, route.contextWindow);
     const pressure = now?.tokens ?? 0;
     // Where the Harness starts summarising by itself on this window (profile.mjs: the reply keeps its room, then the headroom).
     const reply = localOutputBudget(window);
-    const threshold = Math.floor(Math.min(window * 0.8, window - reply - compactionHeadroom(window, reply)));
+    const threshold = Math.floor(Math.min(window * LOCAL_COMPACTION_FRACTION, window - reply - localCompactionHeadroom(window)));
     let verdict = decideFit({ window, pressure, messageTokens: tokens, threshold });
     // The earlier conversation carried into a fresh session is what pushed it over: send the message alone instead.
     if (verdict.action === 'too-large' && carried !== message) {
@@ -1359,7 +1432,7 @@ ${note.text}
 
   /** The line in the chat that explains why the context meter fell: how full it was and how full it is. */
   function summarizedNote(before, after, window) {
-    const w = after?.window || before?.window || window || 0;
+    const w = window || after?.window || before?.window || 0;
     const pct = v => Math.max(0, Math.min(100, Math.round(100 * v.tokens / w)));
     const known = w > 0 && before && after;
     const template = known ? FIT_TEXT.summarized : FIT_TEXT.summarizedShort;
@@ -1473,7 +1546,7 @@ ${note.text}
   /** Let go of a chat's Harness session mapping (a task starts every run in a session of its own). */
   function forget(chatId) { if (chats.get(chatId)?.turn) return; delete sessionMap[chatId]; chats.delete(chatId); persist(); }
 
-  return { compactCommand, messageHelper, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
+  return { compactCommand, messageHelper, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
 }
 
 /** A goal that stopped by itself, in words. */

@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { standardPreset } from './preset.mjs';
+import { GROUP_IDS } from './tools-catalog.mjs';
 import { validMcpName } from '../mcp-names.mjs';
 import { BUDGETS, isPrivateHost } from './llm-shape.mjs';
 import { DDG_PROVIDER_ID } from '../web-search-ddg.mjs';
@@ -58,6 +59,7 @@ export const GATE_PLUGIN = fileURLToPath(new URL('./plugins/strata-gate.mjs', im
 /** The app's web search (DuckDuckGo, or the person's own Exa / Perplexity key), registered with the Harness's web seam. */
 /** Compaction that measures the real prompt and summarises in pieces that fit the window (plugins/strata-context.mjs). */
 export const CONTEXT_PLUGIN = fileURLToPath(new URL('./plugins/strata-context.mjs', import.meta.url));
+export const ON_DEMAND_TOOLS_PLUGIN = fileURLToPath(new URL('./plugins/strata-on-demand-tools.mjs', import.meta.url));
 export const MODELS_PLUGIN = fileURLToPath(new URL('./plugins/strata-models.mjs', import.meta.url));
 export const SEARCH_PLUGIN = fileURLToPath(new URL('./plugins/strata-search.mjs', import.meta.url));
 /** The app's own tool server for the tools a person writes (instructions, commands). */
@@ -130,27 +132,36 @@ function fingerprint(provider, secret) {
  * (A local model has its own, much larger budget: `localOutputBudget`.)
  */
 /**
- * Output budget for a LOCAL model: nearly the whole window, so a thinking model is never cut off mid-thought by the app's own
- * limit (it was 8192, which stopped big coding answers at exactly 8192 tokens). The engine clamps the request to what is left
- * of the context (`fit_max_tokens`, which the app turns on for the models it loads), so a long prompt never turns this into an error.
+ * The LOCAL model's reply reservation for context pressure. The context plugin raises the actual generation ceiling
+ * to as much as half the window, and the engine clamps it to the room left by the prompt (`fit_max_tokens`).
  */
 export function localOutputBudget(context) {
   const c = Number.isFinite(context) && context > 0 ? context : 32768;
-  // 30 percent of the window, at most 32K (9,830 tokens at 32K, 19,660 at 64K): far more than the old 8192 that cut big answers off, and it leaves
-  // the rest for the conversation. The Harness's automatic compaction reads this number as the room the reply reserves: with nearly the whole
-  // window reserved it had no room left to measure pressure in and never compacted; with half of it reserved a 32K window compacted every few
-  // steps (the system prompt and tool list alone are about 7K tokens), which slowed a long task to a crawl.
-  return Math.max(4096, Math.min(32768, Math.floor(c * 0.3)));
+  // Reserve at most 20 percent for an ordinary reply. The context plugin raises the actual generation ceiling when needed;
+  // this reservation leaves enough room for the conversation to reach its 75-percent compaction threshold.
+  return Math.max(512, Math.min(32768, Math.floor(c * 0.2)));
 }
 
 /**
- * When the Harness's automatic compaction starts condensing old history, for one model: its own default keeps 64K tokens of headroom,
- * which on a local window of 32K to 128K leaves no room at all (it then reports a configuration error once and never compacts). An eighth
- * of what the window has left after the reply's room works from 16K up to the largest windows. Compaction then starts at about 60 percent.
+ * The ordinary compaction headroom for API models and configured providers.
  */
 export function compactionHeadroom(context, outputBudget) {
   const room = Math.max(0, (Number.isFinite(context) && context > 0 ? context : 32768) - outputBudget);
   return Math.max(512, Math.min(65536, Math.floor(room * 0.125)));
+}
+
+/** A small local margin that permits a 75-percent threshold at every supported model window. */
+export function localCompactionHeadroom(context) {
+  const window = Number.isFinite(context) && context > 0 ? context : 32768;
+  return Math.max(128, Math.min(65536, Math.floor(window * 0.04)));
+}
+
+export const LOCAL_COMPACTION_FRACTION = 0.75;
+
+/** A checkpoint needs more output room than the pressure headroom: long tasks must keep their decisions and unfinished work. */
+export function compactionOutputBudget(context) {
+  const window = Number.isFinite(context) && context > 0 ? context : 32768;
+  return Math.max(2048, Math.min(8192, Math.floor(window * 0.2)));
 }
 
 /**
@@ -176,6 +187,11 @@ export const effortOf = value => EFFORT_LEVEL[String(value ?? '').toLowerCase()]
  * The budget is the answer's room: a model that thinks keeps what is left of it for the answer, and the Harness sends the window minus the prompt.
  */
 export const DEFAULT_API_OUTPUT = 32768;
+/** Used only until the loaded engine reports its real context window. */
+export const AGENT_LOCAL_CONTEXT_FALLBACK = 32768;
+export function agentLocalContext(window) {
+  return Number.isFinite(window) && window > 0 ? Math.floor(window) : AGENT_LOCAL_CONTEXT_FALLBACK;
+}
 export function outputBudget(context, maxOutput = null) {
   const c = Number.isFinite(context) && context > 0 ? context : null;
   const window = c === null ? Infinity : Math.max(1024, c - Math.min(4096, Math.floor(c / 4)));
@@ -241,7 +257,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
         reasoning: true, reasoningEfforts: LOCAL_EFFORTS,
       }],
     };
-    compaction.push({ provider: route, model: inst.modelId, headroomTokens: compactionHeadroom(context, localOutputBudget(context)) });
+    compaction.push({ provider: route, model: inst.modelId, thresholdRatio: LOCAL_COMPACTION_FRACTION, headroomTokens: localCompactionHeadroom(context), maxTokens: compactionOutputBudget(context) });
     slots = Math.max(slots, Number.isFinite(inst.slots) && inst.slots >= 1 ? Math.floor(inst.slots) : 1);
     const shaped = addShaped(route, providers[route], inst.baseUrl);
     routes.push({ route, fp: fingerprint(providers[route], env[keyEnv]), kind: 'local', connectionName: 'this computer', instanceId: inst.id, modelId: inst.modelId, name: inst.label || inst.modelId, contextWindow: context, ...(shaped ? { shaped } : {}) });
@@ -301,6 +317,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   const browserRows = tools.browserEnabled && tools.browserPath && tools.browserCli
     ? [{ id: 'mcp-browser', name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'browser', transport: 'stdio', command: process.execPath, args: [tools.browserCli, '--browser', 'chromium', '--isolated', ...(process.env.STRATA_BROWSER_HEADLESS === '1' ? ['--headless'] : []), '--executable-path', tools.browserPath] } }] : [];
   const ownRows = [...own('instructions', tools.hasInstructionTools), ...own('commands', tools.hasCommandTools), ...browserRows];
+  const onDemand = tools.onDemand === true && (GROUP_IDS.some(id => !tools.off.has(id)) || mcp.length > 0 || ownRows.length > 0);
   // Web search: DuckDuckGo with no key unless the person chose a keyed service AND saved its key (then that one; never a half-set-up one).
   const searchOn = !tools.off.has('search');
   const keyed = ['exa', 'perplexity', 'deepseek'].includes(tools.search.provider) && tools.search.key ? tools.search.provider : null;
@@ -321,14 +338,15 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // Its web question names the search service the person chose (a keyed one only when its key is saved), and the person's switch skips the question.
     ...(gate ? [{ insert: [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: SEARCH_NAMES[keyed ?? 'builtin'], skipAsk: tools.webWithoutAsking === true } } }] }] : []),
     // Compaction decides from what the model server measured, and its summary requests always fit the window (plugins/strata-context.mjs).
-    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: {} }] },
+    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: { onDemandTools: onDemand } }] },
+    ...(onDemand ? [{ insert: [{ id: 'strata-on-demand-tools', name: ON_DEMAND_TOOLS_PLUGIN, config: {} }] }] : []),
     // Helper agents on a model the person names: every model the app can reach is allowed, and the plugin makes the choice forgiving (plugins/strata-models.mjs).
     ...(subagentRoutes.length ? [{ id: 'subagent-model-selection-settings', config: { enabled: true, allowedModels: subagentRoutes.map(r => ({ provider: r.provider, model: r.model })) } }] : []),
     ...(subagentRoutes.length ? [{ insert: [{ id: 'strata-models', name: MODELS_PLUGIN, config: { routes: subagentRoutes } }] }] : []),
     ...(mcp.length || ownRows.length ? [{ insert: [...mcp, ...ownRows] }] : []),
     ...webRows,
     // The reminder tools would be a second scheduler beside the app's Tasks. The tool groups the person switched off in Settings -> Tools are left out.
-    { id: 'preset-standard', name: '@deepseek-ai/dsh-agent-preset', config: standardPreset({ off: tools.off, search: searchOn, skillsDir, compaction }) },
+    { id: 'preset-standard', name: '@deepseek-ai/dsh-agent-preset', config: standardPreset({ off: tools.off, search: searchOn, skillsDir, compaction, onDemand }) },
     // Strata names its chats itself; the Harness's own title request would be an extra model call on
     // every first prompt (and, for an API route, an unrequested one).
     { id: 'session-title-llm', disabled: true },

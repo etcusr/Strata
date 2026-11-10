@@ -98,6 +98,7 @@ test('activity groups: consecutive tools are one growing group closed by text, w
   const last = out.at(-1);
   assert.equal(last.closed, true); assert.deepEqual(last.counts, { command: 2, read: 1, edit: 1 }); assert.equal(last.added, 225);
   assert.equal(last.line, 'Ran 2 commands, read a file, edited a file +225 ' + MINUS + '0'); assert.deepEqual(last.files.map(f => f.path), ['a.html']);
+  assert.deepEqual(last.toolNames, ['pwsh', 'bash', 'read', 'write'], 'activity names identify the tools used');
   assert.equal(new Set(out.map(f => f.id)).size, 1, 'one id while it grows');
   g.card({ id: '5', name: 'grep', state: 'done' }); g.text();
   assert.notEqual(out.at(-1).id, last.id, 'text starts a new group');

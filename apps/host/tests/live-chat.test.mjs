@@ -30,20 +30,25 @@ test('item 1: only the newest status frame is kept, and idle, a missing phase or
   assert.equal(status.statusOf(chat), null, 'done and error clear it too');
 });
 
-test('item 1: playful words only while it thinks; a running tool always shows the real action', () => {
+test('item 1: the status names observed model and tool work without invented rotating messages', () => {
   const frame = (phase, code, args) => ({ seq: 1, phase, code, text: `${phase}…`, args, elapsedMs: 0, receivedAt: 0 });
-  const words = Array.from({ length: 12 }, (_, i) => status.statusWords(frame('thinking', 'thinking'), i));
-  assert.equal(new Set(words).size, 12, 'a tasteful list of twelve');
-  assert.equal(words[0], 'Thinking…');
-  assert.ok(words.includes('Cooking up an answer…') && words.includes('Pondering…'));
-  assert.equal(status.statusWords(frame('thinking', 'thinking'), 13), words[1], 'it rotates round');
-  assert.equal(status.statusWords(frame('waiting', 'model-working'), 2), words[2]);
-  assert.equal(status.statusWords(frame('waiting', 'reading-prompt'), 5), 'Reading your message…', 'what is really happening is said plainly');
-  assert.equal(status.statusWords(frame('preparing', 'preparing-tool', { verb: 'Writing a file', target: 'pagoda.html' }), 5), 'Writing a file · pagoda.html…');
-  assert.equal(status.statusWords(frame('tool', 'tool', { verb: 'Searching the web' }), 9), 'Searching the web…');
-  assert.equal(status.statusWords(frame('goal', 'goal-step', { round: 2 }), 7), 'Working on the goal…');
-  assert.equal(status.isPlayful(frame('tool', 'tool')), false);
+  assert.equal(status.statusWords(frame('thinking', 'thinking')), 'Generating reasoning…');
+  assert.equal(status.statusWords(frame('waiting', 'model-working')), 'Waiting for model output…');
+  assert.equal(status.statusWords(frame('waiting', 'reading-prompt')), 'Reading your message…');
+  assert.equal(status.statusWords(frame('waiting', 'reading-prompt'), { phase: 'reading', prompt: { done: 1200, total: 6000 } }), 'Reading prompt · 1,200 / 6,000 tokens');
+  assert.equal(status.statusWords(frame('waiting', 'model-working'), { phase: 'busy-other' }), 'Local model busy with another request…');
+  assert.equal(status.statusWords(frame('thinking', 'thinking'), { phase: 'reading', prompt: { done: 9000, total: 6000 } }), 'Reading prompt · 6,000 / 6,000 tokens');
+  assert.equal(status.statusWords(frame('preparing', 'preparing-tool', { verb: 'Writing a file', target: 'pagoda.html' })), 'Writing a file · pagoda.html…');
+  assert.equal(status.statusWords(frame('tool', 'tool', { verb: 'Searching the web' })), 'Searching the web…');
+  assert.equal(status.statusWords(frame('goal', 'goal-step', { round: 2 })), 'Working on the goal…');
   assert.equal(status.elapsedText(0, 14_000), '14s'); assert.equal(status.elapsedText(0, 64_000), '1m 04s');
+});
+
+test('the status ignores prompt progress from a previous chat or an orphaned request', () => {
+  const older = { time: 200, live: { state: 'reading', elapsed_s: 30, prompt_read: 22528, prompt_total: 153641 } };
+  assert.deepEqual(status.nativeActivityForTurn(older, 190000), { phase: 'busy-other' });
+  assert.deepEqual(status.nativeActivityForTurn(older, 165000), { phase: 'reading', prompt: { done: 22528, total: 153641 }, generated: 0 });
+  assert.equal(status.nativeActivityForTurn({ time: 200, live: { state: 'idle' } }, 190000), null);
 });
 
 test('item 2: the reasoning row shows what it is thinking about, then how long it took; it sticks to the bottom only while the person has not scrolled up', () => {

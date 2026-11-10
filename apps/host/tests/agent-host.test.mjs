@@ -85,6 +85,47 @@ const toolStates = (frames, id) => frames.filter(f => f.type === 'agent-tool' &&
 const text = frames => frames.filter(f => f.type === 'delta').map(f => f.text).join('');
 const lines = file => readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).length;
 
+test('a message steers the active agent turn and does not start another turn', { skip }, async t => {
+  const s = await setup(t);
+  const chatId = 'chat-steer';
+  let receipt;
+  const started = Date.now();
+  const frames = await s.send(chatId, 'SCRIPT:slow 200', f => {
+    if (f.type === 'delta' && !receipt) receipt = s.host.post('/api/chat/steer', { sessionId: chatId, message: 'SCRIPT:echo changed while working' });
+  });
+  assert.ok(receipt, 'the first answer streamed before the extra message');
+  const accepted = await receipt;
+  assert.equal(accepted.status, 200);
+  assert.match(accepted.body.requestId, /^steer-/);
+  assert.equal(accepted.body.rapid, true, 'only the current model generation is restarted');
+  assert.ok(frames.some(f => f.type === 'steer-applied' && f.requestId === accepted.body.requestId), 'the stream confirms when the agent actually starts using the update');
+  assert.match(text(frames), /changed while working/);
+  assert.ok(Date.now() - started < 6000, 'the update is used before the original eight-second answer would finish');
+  assert.equal(frames.filter(f => f.type === 'done').length, 1);
+  const idle = await s.host.post('/api/chat/steer', { sessionId: chatId, message: 'too late' });
+  assert.equal(idle.status, 409);
+});
+
+test('steering while a tool awaits approval keeps that tool and applies the update after it', { skip }, async t => {
+  const s = await setup(t);
+  const chatId = 'chat-steer-tool';
+  let control;
+  const frames = await s.send(chatId, 'SCRIPT:tool steer-tool.txt kept', f => {
+    if (f.type === 'agent-tool' && f.tool.state === 'proposed' && !control) control = (async () => {
+      const steer = await s.host.post('/api/chat/steer', { sessionId: chatId, message: 'SCRIPT:echo after the tool' });
+      const approval = await s.host.post('/api/chat/approval', { sessionId: chatId, toolId: f.tool.id, decision: 'approve' });
+      return { steer, approval };
+    })();
+  });
+  const result = await control;
+  assert.equal(result.steer.status, 200);
+  assert.equal(result.steer.body.rapid, false);
+  assert.equal(result.approval.status, 200);
+  assert.equal(lines(join(s.ws, 'steer-tool.txt')), 1);
+  assert.ok(frames.some(f => f.type === 'steer-applied' && f.requestId === result.steer.body.requestId));
+  assert.match(text(frames), /after the tool/);
+});
+
 test('status names the component and the routes, and carries no secret', { skip }, async t => {
   const s = await setup(t);
   const status = await s.host.status();

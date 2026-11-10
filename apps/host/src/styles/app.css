@@ -7017,6 +7017,7 @@ textarea {
 /* What you type and the small print under each message follow the reading size too, so the whole conversation changes together. */
 .st-composer textarea { font-size: var(--st-content-fs, 12px); }
 .st-msg__meta, .st-msg__meta time { font-size: var(--st-fs-read-sm); }
+.st-msg__meta time, .st-msg__elapsed { color: var(--st-ink-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* What an approval is about, shown without opening the card: the file or the command. */
 .toolcard__what { display: block; margin: 4px 0 2px; padding: 6px 10px; background: var(--st-surface-2); color: var(--st-ink); border: 1px solid var(--st-line); border-radius: var(--st-r-sm); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 6.5em; overflow: auto; font-size: 12px; }
@@ -7157,12 +7158,11 @@ textarea {
 
 /* ---- the live status line ---- */
 .live-status { display: flex; flex-wrap: wrap; align-items: center; column-gap: 10px; row-gap: 2px; min-height: 28px; margin-top: 6px; color: var(--st-ink-soft); font-size: var(--st-fs-sm); }
-/* no fixed widths (a long time such as "103m 19s" or "1,234,567 tokens" must never run into its neighbour): the word takes what it needs up to 24 characters and gives way first,
-   the time and the count keep their own width and drop to a second line when the row is too narrow */
-.live-status__verb { flex: 0 1 24ch; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The full prompt progress stays readable; time and token count wrap below it on narrow windows. */
+.live-status__verb { flex: 0 1 auto; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .live-status__time, .live-status__tokens { flex: none; font-variant-numeric: tabular-nums; color: var(--st-ink-muted); white-space: nowrap; }
 .live-status__tokens:empty { display: none; }
-@media (max-width: 520px) { .live-status__verb { flex: 1 1 0; min-width: 12ch; } }
+@media (max-width: 520px) { .live-status__verb { flex: 1 1 100%; } }
 .live-status__verb { font-weight: 700; color: var(--st-ink); animation: live-verb var(--st-t-control) var(--st-ease-enter); }
 .live-status__pulse { width: 14px; height: 14px; position: relative; flex: none; }
 .live-status__pulse i { position: absolute; inset: 0; border-radius: 50%; background: var(--st-accent); opacity: .9; animation: st-pulse 1.6s var(--st-ease-in-out) infinite; }
@@ -7441,6 +7441,7 @@ textarea {
 .act { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; color: var(--st-ink-muted); font-size: var(--st-fs-sm); }
 .act__line { display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0; padding: 2px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .act__line:disabled { cursor: default; }
+.act__tools { color: var(--st-ink-soft); font-family: var(--st-font-mono); font-size: var(--st-fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .act__chev { color: var(--st-icon); transition: transform var(--st-t-local) var(--st-ease-standard); }
 .act[data-open] .act__chev { transform: rotate(180deg); }
 .act__live { width: 6px; height: 6px; border-radius: 50%; background: var(--st-accent); animation: st-pulse 1.6s var(--st-ease-in-out) infinite; }
@@ -7581,6 +7582,9 @@ html[data-motion='reduced'] .native-progress__bar[data-indeterminate] > i { anim
 .parked__item .xs { flex: none; }
 .parked__text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--st-fs-sm); }
 .composer__busy-hint { margin: 8px 4px 0; }
+.st-steering { display: flex; flex-direction: column; gap: 3px; max-width: min(85%, 680px); margin: 10px 0 8px auto; padding: 8px 11px; border: 1px solid var(--st-line); border-radius: 10px; background: var(--st-surface); overflow-wrap: anywhere; white-space: pre-wrap; }
+.st-steering[data-state="accepted"] { border-left: 3px solid var(--st-accent); }
+.st-steering[data-state="applied"] { border-left: 3px solid var(--st-accent-text); }
 
 /* ---- quoting a turn or a passage into the next message (#4785) ---- */
 .quotes { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; max-height: 30vh; overflow-y: auto; }

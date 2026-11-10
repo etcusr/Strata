@@ -1166,6 +1166,17 @@ class Strata:
                               "ram_needed_gb": d["ram_gb"], "experts_gb": d.get("arena_gb"), "mem_total": False,
                               "memory_gb": round(float(d.get("arena_gb") or d["ram_gb"]) + 1.0, 1),
                               "on_this_pc": self._mac_verdict(m, ram) if ram else None, "installed": tag in have, "id": tag})
+            if family == "qwen":
+                local = (("q2_0_abliterated", "Q2_0 Uncensored", "Locally installed abliterated Q2_0"),
+                         ("q2_0_hybrid", "IQ3_XXS-Q2_0 Uncensored", "Locally installed hybrid with IQ3_XXS dense weights"))
+                for tag, label, about in local:
+                    if tag not in have:
+                        continue
+                    for index, choice in enumerate(sizes):
+                        if choice["id"] == "q2_0":
+                            sizes.insert(index + 1, {**choice, "id": tag, "model": label, "about": about,
+                                                     "installed": True})
+                            break
             if sizes:
                 out.append({"family": family, "title": fd["title"], "about": fd.get("about"), "experimental": False,
                             "images": any(x["images"] for x in sizes), "sizes": sizes})

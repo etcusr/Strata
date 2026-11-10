@@ -44,8 +44,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Markdown } from '../components/Markdown';
 import { Btn, Icon, IconBtn, ErrorNotice, type IconName } from '../components/ui';
 import { composerCap, scrollBehavior } from '../lib/responsive';
-import { relTime, cx, duration, tokens, tps } from '../lib/format';
-import { addQuote, clearQuotes, removeQuote, createSubagentExample, parkMessage, takeParked, pushToast, setPreviewTabClosed, branchFrom, continueLast, markRead, retryLast, selectSession, rewindTo, sendMessage, stopStreaming, useStore, } from '../lib/store';
+import { cx, duration, tokens, tps } from '../lib/format';
+import { addQuote, clearQuotes, removeQuote, createSubagentExample, isAgentTurn, parkMessage, takeParked, pushToast, setPreviewTabClosed, branchFrom, continueLast, markRead, retryLast, selectSession, rewindTo, sendMessage, steerCurrentTurn, stopStreaming, useStore, } from '../lib/store';
 import { CopyBtn, CopyMenuItem, MenuCloseContext } from '../components/CopyBtn';
 import { KEYS_UP, PILL_DISTANCE, distanceFromBottom, followAfterScroll, wheelLeavesBottom } from '../lib/follow-scroll';
 import { getSlashCommands } from '../lib/commands';
@@ -104,6 +104,7 @@ export function ChatScreen() {
             void sendMessage(next);
     }, [streaming, parked?.length, session?.id]);
     const [draft, setDraft] = useState('');
+    const [steering, setSteering] = useState(false);
     const draftKey = `strata.chat-draft.${session?.id ?? 'new'}`;
     useEffect(() => {
         setDraft(sessionStorage.getItem(draftKey) ?? '');
@@ -348,7 +349,7 @@ export function ChatScreen() {
         }
         if (pinned.current || sent)
             scrollToLatest();
-    }, [session?.messages.length, session?.messages.at(-1)?.content, scrollToLatest]);
+    }, [session?.messages.length, session?.messages.at(-1)?.content, session?.messages.at(-1)?.steering?.length, session?.messages.at(-1)?.steering?.at(-1)?.state, scrollToLatest]);
     // Scroll position is remembered per conversation, so returning to one puts you
     // back where you were reading rather than at the top or the bottom.
     useEffect(() => {
@@ -439,6 +440,17 @@ export function ChatScreen() {
         if (scroller.current?.querySelector('.first-chat-start'))
             textarea.current?.focus({ preventScroll: true });
     }, [setupVisible, readyForChat, session?.id, messageCount]);
+    function steer() {
+        const text = draft.trim();
+        if (!session || !text || steering || !isAgentTurn(session.id)) return;
+        if (queuedPhotos.length) { pushToast('info', tr('The assistant is still answering'), tr('Send your message when it has finished.')); return; }
+        const out = quotedMessage(quotes, text);
+        setSteering(true);
+        void steerCurrentTurn(session.id, out).then(() => {
+            if (sessionStorage.getItem(draftKey)?.trim() === text) { updateDraft(''); clearQuotes(session.id); }
+        }, e => pushToast('error', tr('The message could not be added to the task'), plainFailureText(e instanceof Error ? e.message : String(e)).message))
+            .finally(() => setSteering(false));
+    }
     function submit() {
         const text = draft.trim();
         if (!text && !queuedPhotos.length)
@@ -449,6 +461,8 @@ export function ChatScreen() {
                 return;
             const plan = busyPlan(whileBusy);
             const out = quotedMessage(quotes, text);
+            if (plan === 'steer' && isAgentTurn(session.id)) { steer(); return; }
+            if (plan === 'steer') { updateDraft(''); clearQuotes(session.id); parkMessage(session.id, out); return; }
             // Interrupt: the answer stops where it is (what is written stays) and the message goes as soon as it has stopped (the effect below sends it).
             if (plan === 'interrupt') {
                 updateDraft('');
@@ -488,7 +502,7 @@ export function ChatScreen() {
               <UsageDashboard loaded={!!loaded}/>
             </div>
           </div>
-          <Composer draft={draft} setDraft={updateDraft} loaded={!!loaded} streaming={streaming} onSubmit={submit} onKey={onComposerKey} session={session} onPreview={openPreview} textareaRef={textarea}/>
+          <Composer draft={draft} setDraft={updateDraft} loaded={!!loaded} streaming={streaming} onSubmit={submit} onSteer={steer} steering={steering} onKey={onComposerKey} session={session} onPreview={openPreview} textareaRef={textarea}/>
          </DropZone>
         <ArtifactPanel items={previews} onCloseTab={closeTab} selected={setupVisible ? null : selectedPreview} onSelect={selectPreview} onClose={() => setSelectedPreview(null)} inline={inlinePreview}/>
          {tr(resizeHandle)}
@@ -533,7 +547,7 @@ export function ChatScreen() {
           </div>
           <div className="jumplatest-row">{tr(awayFromBottom ? (<button type="button" className="jumplatest" data-finished={justFinished || undefined} aria-label={tr("Scroll to the latest message")} title={tr("Scroll to the latest message")} onClick={() => scrollToLatest()}>
                 <Icon name="chevron" size={18}/></button>) : null)}</div>
-          <Composer draft={draft} setDraft={updateDraft} loaded={!!loaded} streaming={streaming} onSubmit={submit} onKey={onComposerKey} session={session} onPreview={openPreview} textareaRef={textarea}/>
+          <Composer draft={draft} setDraft={updateDraft} loaded={!!loaded} streaming={streaming} onSubmit={submit} onSteer={steer} steering={steering} onKey={onComposerKey} session={session} onPreview={openPreview} textareaRef={textarea}/>
         </DropZone>
         {tr(!setupVisible && selectedRun && session ? <TimeSkipPanel key={selectedRun.id} run={selectedRun} sessionId={session.id} inline={inlinePreview} expanded={expanded} onCompare={setExpanded} onPreview={openPreview} onClose={() => { setSelectedPreview(null); setExpanded(false); }}/> : null)}
         {tr(!setupVisible && planShown ? <PlanPanel chatId={session?.id}/> : null)}
@@ -596,12 +610,14 @@ const NO_QUOTES: Quote[] = [];
 function quotedMessage(quotes: readonly Quote[], text: string): string {
     return quotes.length && !text.startsWith('/') ? composeQuoted(quotes.map(q => q.text), text) : text;
 }
-function Composer({ draft, setDraft, loaded, streaming, onSubmit, onKey, session, onPreview, textareaRef, }: {
+function Composer({ draft, setDraft, loaded, streaming, onSubmit, onSteer, steering, onKey, session, onPreview, textareaRef, }: {
     draft: string;
     setDraft: (v: string) => void;
     loaded: boolean;
     streaming: boolean;
     onSubmit: () => void;
+    onSteer: () => void;
+    steering: boolean;
     onKey: (e: React.KeyboardEvent) => void;
     session: Session | null;
     onPreview: (a: PreviewArtifact) => void;
@@ -694,10 +710,10 @@ function Composer({ draft, setDraft, loaded, streaming, onSubmit, onKey, session
         }}/>
           <div className="st-composer__bar">
             <ComposerControls draft={draft} onDraft={setDraft} session={session} onPreview={onPreview} streaming={streaming} onSlash={() => { setSlashDismissed(false); setSlashOpen(true); requestAnimationFrame(() => textareaRef.current?.focus()); }} onError={setFileError} onAttach={(name, text) => { setDraft(`${draft}${draft ? '\n\n' : ''}Attached ${name}\n\n${text}`); requestAnimationFrame(() => textareaRef.current?.focus()); }}/>
-            {tr(streaming ? (<Btn variant="secondary" size="sm" icon="stop" onClick={stopStreaming}>{tr("Stop")}</Btn>) : (<Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr("Send")}</Btn>))}
+            {tr(streaming ? <>{isAgentTurn(session?.id) && draft.trim() ? <Btn variant="primary" size="sm" icon="send" disabled={steering || draft.trim().length > 8000 || !!photos.length} onClick={onSteer}>{tr("Add to task")}</Btn> : null}<Btn variant="secondary" size="sm" icon="stop" onClick={stopStreaming}>{tr("Stop")}</Btn></> : (<Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr("Send")}</Btn>))}
           </div>
         </div>
-        {tr(streaming && draft.trim() && whileBusy !== 'wait' ? <p className="xs muted composer__busy-hint" role="status">{tr(whileBusy === 'queue' ? "Enter sends it when the answer is done." : "Enter stops the answer here and sends it now.")}</p> : null)}
+        {tr(streaming && draft.trim() && whileBusy !== 'wait' ? <p className="xs muted composer__busy-hint" role="status">{tr(whileBusy === 'queue' || whileBusy === 'steer' && !isAgentTurn(session?.id) ? "Enter sends it when the answer is done." : whileBusy === 'steer' ? "Enter adds it to the current task without stopping it." : "Enter stops the answer here and sends it now.")}</p> : null)}
         <ChatTelemetry session={session}/>
         </div>
       </div>
@@ -715,6 +731,7 @@ function Composer({ draft, setDraft, loaded, streaming, onSubmit, onKey, session
     </div>);
 }
 const Message = memo(MessageView);
+const messageTime = (date: Date) => date.toLocaleTimeString(localeTag(), { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
 function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePreview, onOpenLink, onOpenTimeSkip, timeSkipDone, timeSkipReal, timeSkipRun, }: {
     message: ChatMessage;
     isLast: boolean;
@@ -736,13 +753,14 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
     const planCard = !!m.planId && storedPlan?.id === m.planId;
     // A reply with activity lines is drawn piece by piece in the order it came; one without is the plain text it always was.
     const grouped = !!m.blocks?.some(b => b.kind === 'group');
-    const [sentTime, setSentTime] = useState(() => relTime(m.at));
+    const started = new Date(m.at);
+    const finished = m.role === 'assistant' && !m.streaming && m.durationMs ? new Date(started.getTime() + m.durationMs) : started;
     const sentQuote = m.role === 'user' ? parseQuoted(m.content) : null;
     if (m.role === 'user') {
-        return (<div className="st-msg st-msg--user" data-message-id={m.id} onMouseEnter={() => setSentTime(relTime(m.at))} onFocus={() => setSentTime(relTime(m.at))}>
+        return (<div className="st-msg st-msg--user" data-message-id={m.id}>
         <div className="st-bubble">{tr(m.photos?.length ? <ChatPhotos photos={m.photos}/> : null)}{sentQuote ? <><SentQuotes quotes={sentQuote.quotes}/><span className="st-bubble__text">{sentQuote.reply}</span></> : m.markdown ? <Markdown text={m.content} onOpenLink={onOpenLink} imageSession={activeSession}/> : <span className="st-bubble__text">{m.content}</span>}</div>
         <div className="st-msg__meta">
-          <time dateTime={m.at} title={tr(new Date(m.at).toLocaleString(localeTag()))}>{tr(sentTime)}</time>
+          <time dateTime={m.at} title={started.toLocaleString(localeTag())}>{messageTime(started)}</time>
           <span className="st-msg__actions">
             <CopyBtn text={m.content} label="Message" title="Copy message"/>
             <IconBtn name="refresh" title={tr("Rewind to here")} disabled={streaming} onClick={() => {
@@ -777,15 +795,19 @@ function MessageView({ message: m, isLast, onEditPrompt, onPreview, onClosePrevi
         {/* the caret follows the text being written; after an activity line it hung on a row of its own and the reply jumped when the text went on */}
         {tr(m.streaming && m.content && !m.drafts?.length && (!grouped || m.blocks!.at(-1)?.kind === 'text') ? <span className="caret" aria-hidden="true"/> : null)}
       </div> : null)}
+      {tr(!m.streaming && grouped && m.blocks?.every(b => b.kind !== 'group' || !b.toolNames?.length) && m.tools?.some(t => t.state === 'done') ? <div className="act"><span>{tr('Tools used')}: {Array.from(new Set(m.tools.filter(t => t.state === 'done').map(t => t.name))).join(', ')}</span></div> : null)}
       {tr(m.skills?.length && !m.streaming ? <SkillsUsed skills={m.skills}/> : null)}
+      {tr(m.steering?.map(s => <div className="st-steering" key={s.id} role="status" data-state={s.state}><span className="xs muted">{tr(s.state === 'sending' ? "Sending update…" : s.state === 'accepted' ? "Update received. The agent will use it on the next step." : s.state === 'applied' ? "The agent is working with this update." : s.state === 'missed' ? "The task ended before this update was applied." : "Added while working")}</span><span>{s.text}</span></div>))}
       {tr(m.deliverables?.length && !m.streaming ? <div className="deliverables">{m.deliverables.length >= COMPACT_FILES_FROM ? <FilesSummary files={m.deliverables} answer={m.content} sessionId={activeSession ?? ''} onPreview={onPreview}/> : <>{m.deliverables.map(f => <FileCard key={f.path} file={f} sessionId={activeSession ?? ''} onPreview={onPreview}/>)}<EditedFiles files={m.deliverables} sessionId={activeSession ?? ''} onPreview={onPreview}/></>}</div> : null)}
-      {tr(m.streaming && isLast && !m.timeSkipId ? <StatusLine sessionId={activeSession} startedAt={Date.parse(m.at) || Date.now()} tokens={m.tokens}/> : null)}
+      {tr(m.streaming && isLast && !m.timeSkipId ? <StatusLine sessionId={activeSession} startedAt={Date.parse(m.at) || Date.now()} tokens={m.tokens} remoteModel={m.remoteModel} activeTool={m.tools?.slice().reverse().find(t => t.state === 'running' || t.state === 'approved' || t.state === 'proposed')?.name}/> : null)}
 
       {tr(m.timeSkipId && timeSkipReal && !timeSkipDone && timeSkipRun ? <TimeSkipWorking run={timeSkipRun} sessionId={activeSession ?? ''}/> : m.timeSkipId && (!timeSkipReal || (timeSkipRun?.job?.files?.length ?? 0) > 0) ? <button className="timeskip-chat-card" onClick={() => onOpenTimeSkip(m.timeSkipId!)}><Icon name="branch" size={20}/><span><strong>{tr("Time-skip")}</strong><span>{tr(timeSkipDone ? 'Result ready · compare versions' : 'Revising · follow progress')}</span></span><Icon name="chevron" size={16} className="timeskip-card-arrow"/></button> : null)}
       {tr(m.media?.length ? <ChatMedia items={m.media} onPreview={onPreview}/> : null)}
       {tr(m.artifacts?.length ? <div className="artifact-cards">{tr(m.artifacts.map(a => <ArtifactCard key={a.id} artifact={a} onPreview={onPreview}/>))}</div> : null)}
 
       {tr(!m.streaming && !m.timeSkipId && (m.content || m.error) ? (<div className="st-msg__meta">
+          <time dateTime={finished.toISOString()} title={finished.toLocaleString(localeTag())}>{messageTime(finished)}</time>
+          {tr(m.durationMs ? <span className="st-msg__elapsed">· {tr('Response time')}: {duration(m.durationMs)}</span> : null)}
           <span className="st-msg__actions">
             {tr(isLast ? <>
               <CopyBtn text={m.content} label="Response" title="Copy response"/>
