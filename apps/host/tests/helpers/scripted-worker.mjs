@@ -40,13 +40,14 @@ import { createHash } from 'node:crypto';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false } = {}) {
+export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false, slotSave = null } = {}) {
   // `window` + `charsPerToken` make it behave like the engine: every request's prompt is counted (its size over charsPerToken), the usage it
   // reports is that count, and a prompt that leaves no room to answer is refused with the engine's own 400 ("requests are never truncated").
   // `serial` stands in for an engine with one request slot: the next request waits until the one before it has finished.
   let tail = Promise.resolve();
   const turn = () => { let release; const mine = new Promise(r => { release = r; }); const wait = tail; tail = tail.then(() => mine); return wait.then(() => release); };
   const requests = [];
+  const slotRequests = [];
   const counts = [];
   let aborted = 0;
   const server = createServer(async (req, res) => {
@@ -54,6 +55,12 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
     const json = (code, body) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     if (req.method === 'GET' && url.pathname === '/health') return json(200, { ok: true });
     if (req.method === 'GET' && url.pathname === '/v1/models') return json(200, { object: 'list', data: [{ id: model, object: 'model' }] });
+    if (req.method === 'POST' && url.pathname === '/slots/0' && slotSave) {
+      let raw = ''; for await (const chunk of req) raw += chunk;
+      const call = { action: url.searchParams.get('action'), filename: JSON.parse(raw).filename };
+      slotRequests.push(call);
+      try { return json(200, await slotSave(call)); } catch (e) { return json(503, { error: { message: e.message } }); }
+    }
     if (req.method === 'GET' && url.pathname === '/__requests') return json(200, { requests, aborted });
     // The engine's own token count of a message (Anthropic style): characters over the density, plus the template's few tokens.
     if (req.method === 'POST' && url.pathname.endsWith('/messages/count_tokens')) {
@@ -298,7 +305,7 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
   return {
     port: server.address().port,
     url: `http://127.0.0.1:${server.address().port}/v1`,
-    requests, counts, get aborted() { return aborted; },
+    requests, counts, slotRequests, get aborted() { return aborted; },
     close: () => new Promise(r => { server.closeAllConnections?.(); server.close(r); }),
   };
 }

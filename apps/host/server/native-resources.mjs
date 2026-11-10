@@ -5,6 +5,8 @@ import {parseEngineVersion} from './engine-version.mjs';
 const ENGINE_DEFAULT_RESERVE_MIB=700;
 /** A card that drives no display needs little beside the engine; the engine keeps the last few hundred MiB for allocations it makes after the cache. */
 const COMPUTE_ONLY_RESERVE_MIB=512;
+export const PERFORMANCE_EXTRA_RAM_MAX_MIB=1024;
+const SNAPSHOT_FREE_FLOOR_MIB=2560;
 
 const wholeMib=v=>v!==null&&v!==undefined&&v!==''&&Number.isFinite(Number(v))&&Number(v)>=0?Math.trunc(Number(v)):null;
 
@@ -83,6 +85,7 @@ export function resourceSettings(config,hardware,profile,model={},values={}){
  // unchanged, which every engine understands: a RAM budget of 80% of the PC (--resident-budget-gib, which implies --mmap-experts) when the model's experts do not fit there (the setup rule: experts plus
  // 10 GB), and a STRATA_RESIDENT_HEADROOM_GIB of 20% of the RAM. Full performance (and `strata serve`) pass nothing: the whole system, the arena whenever it fits; either rule is taken out again.
  if(baseline.ramBudget)remove('--resident-budget-gib');
+ if(baseline.snapshotFloor)remove('--conversation-cache-min-free-mib');
  let env=null;
  const dropEnv=name=>{if(config.env&&name in config.env){env={...(env??config.env)};delete env[name];}};
  if(baseline.ramHeadroom)dropEnv('STRATA_RESIDENT_HEADROOM_GIB');
@@ -99,7 +102,14 @@ export function resourceSettings(config,hardware,profile,model={},values={}){
    if(!(env??config.env)?.STRATA_RESIDENT_HEADROOM_GIB){env={...(env??config.env??{}),STRATA_RESIDENT_HEADROOM_GIB:String(Math.ceil(ram*.2))};ramHeadroom=true;}
   }
  }
- return {args,vram_reserve_mib:reserve,...(asked!==null?{}:{ui_reserve_applied:reserve}),...(env?{env}:{}),ui_resource_baseline:{...baseline,ramBudget,ramHeadroom,ramKeep}};
+ const extraInput=values?.performance_extra_ram_mib??config.ui_performance_extra_ram_mib??0;
+ const extra=Number(extraInput);
+ if(!Number.isInteger(extra)||extra<0||extra>PERFORMANCE_EXTRA_RAM_MAX_MIB||extra%256!==0)throw new Error('Choose extra RAM in 256 MiB steps, up to 1024 MiB.');
+ let snapshotFloor=false;
+ if(profile==='performance'&&extra>0&&!args.includes('--conversation-cache-min-free-mib')){
+  args.push('--conversation-cache-min-free-mib',String(SNAPSHOT_FREE_FLOOR_MIB-extra));snapshotFloor=true;
+ }
+ return {args,vram_reserve_mib:reserve,...(asked!==null?{}:{ui_reserve_applied:reserve}),...(env?{env}:{}),ui_performance_extra_ram_mib:extra,ui_resource_baseline:{...baseline,ramBudget,ramHeadroom,ramKeep,snapshotFloor}};
 }
 
 /** The RAM, in GiB, "Leave 20% for my work" asks the engine to keep free: a fifth of the PC's RAM rounded up, never under 5 or over 8

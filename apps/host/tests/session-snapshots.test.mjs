@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createSessionSnapshots, MIN_SNAPSHOT_TOKENS } from '../server/agent/session-snapshots.mjs';
@@ -59,4 +59,57 @@ test('a refused restore falls back without changing the saved chat', async t => 
   assert.equal(await snapshots.restore('chat', 'session', route), false);
   assert.equal(await snapshots.restore('chat', 'session', route), false);
   assert.equal(restores, 1, 'a failed restore does not delay every later turn');
+});
+
+test('skipping a stopped-turn save keeps the last good file', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'strata-session-skip-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let release, saves = 0;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const localInstances = () => [{ id: 'local', loadedAt: 'first', snapshotEnabled: true, slots: 1, modelId: 'qwen', baseUrl: 'http://127.0.0.1:18500/v1' }];
+  const fetcher = async (url, options) => {
+    const file = JSON.parse(options.body).filename;
+    if (new URL(url).searchParams.get('action') !== 'save') return { ok: true, json: async () => ({ n_restored: 40_000 }) };
+    if (++saves === 2) await waiting;
+    mkdirSync(join(root, 'session-files'), { recursive: true });
+    writeFileSync(join(root, 'session-files', file), `save-${saves}`);
+    return { ok: true, json: async () => ({ n_saved: 40_000 }) };
+  };
+  const snapshots = createSessionSnapshots({ root, localInstances, fetcher });
+  const route = { instanceId: 'local' };
+  assert.equal(await snapshots.save('chat', 'session', route, 40_000), true);
+  const before = JSON.parse(readFileSync(join(root, 'session-snapshots.json'), 'utf8')).records.chat.file;
+  const second = snapshots.save('chat', 'session', route, 0, { force: true });
+  assert.equal(snapshots.cancel('chat'), true);
+  release();
+  assert.equal(await second, false);
+  const after = JSON.parse(readFileSync(join(root, 'session-snapshots.json'), 'utf8')).records.chat.file;
+  assert.equal(after, before);
+  assert.equal(readFileSync(join(root, 'session-files', before), 'utf8'), 'save-1');
+});
+
+test('deleting a chat during a save discards both old and in-flight session files', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'strata-session-delete-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let release, saves = 0;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const localInstances = () => [{ id: 'local', loadedAt: 'first', snapshotEnabled: true, slots: 1, modelId: 'qwen', baseUrl: 'http://127.0.0.1:18500/v1' }];
+  const fetcher = async (url, options) => {
+    const file = JSON.parse(options.body).filename;
+    if (++saves === 2) await waiting;
+    mkdirSync(join(root, 'session-files'), { recursive: true });
+    writeFileSync(join(root, 'session-files', file), 'checkpoint');
+    return { ok: true, json: async () => ({ n_saved: 40_000 }) };
+  };
+  const snapshots = createSessionSnapshots({ root, localInstances, fetcher });
+  const route = { instanceId: 'local' };
+  assert.equal(await snapshots.save('chat', 'session', route, 40_000), true);
+  const oldFile = JSON.parse(readFileSync(join(root, 'session-snapshots.json'), 'utf8')).records.chat.file;
+  const second = snapshots.save('chat', 'session', route, 0, { force: true });
+  snapshots.forget('chat');
+  release();
+  assert.equal(await second, false);
+  assert.equal(existsSync(join(root, 'session-files', oldFile)), false);
+  assert.deepEqual(readdirSync(join(root, 'session-files')), []);
+  assert.deepEqual(JSON.parse(readFileSync(join(root, 'session-snapshots.json'), 'utf8')).records, {});
 });

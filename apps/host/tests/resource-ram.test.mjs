@@ -93,6 +93,17 @@ test('full performance takes the RAM settings of either engine out again and kee
   assert.equal(resourceSettings(config, pc64, 'performance', iq3sNew).env, undefined, 'performance from the start: nothing is passed, the whole system is used');
 });
 
+test('Performance extra RAM lowers only the conversation save reserve and is removed in Work mode', () => {
+  const tuned=resourceSettings(config,pc64,'performance',iq3sNew,{performance_extra_ram_mib:512});
+  assert.equal(flag(tuned.args,'--conversation-cache-min-free-mib'),'2048');
+  assert.equal(tuned.ui_performance_extra_ram_mib,512);
+  const work=resourceSettings({...config,...tuned,ui_resource_profile:'performance'},pc64,'work',iq3sNew);
+  assert.equal(work.args.includes('--conversation-cache-min-free-mib'),false);
+  const again=resourceSettings({...config,...work,ui_resource_profile:'work'},pc64,'performance',iq3sNew);
+  assert.equal(flag(again.args,'--conversation-cache-min-free-mib'),'2048');
+  assert.throws(()=>resourceSettings(config,pc64,'performance',iq3sNew,{performance_extra_ram_mib:1536}),/1024 MiB/);
+});
+
 test('switching the engine in the Engine tab between loads swaps the rule: new -> old and old -> new', () => {
   const asConfig = r => ({ ...config, args: r.args, env: r.env, ui_resource_profile: 'work', ui_resource_baseline: r.ui_resource_baseline });
   const onNew = resourceSettings(config, pc64, 'work', iq3sNew);

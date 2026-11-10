@@ -15,6 +15,9 @@ export function createSessionSnapshots({ root, localInstances, log = () => {}, f
   const discarded = new Set();
   const instanceFor = route => localInstances().find(i => i.id === route?.instanceId && i.snapshotEnabled && (i.slots ?? 1) === 1 && i.loadedAt);
   const filename = chatId => `${createHash('sha256').update(String(chatId)).digest('hex').slice(0, 32)}.bin`;
+  const newFilename = chatId => `${filename(chatId).slice(0, -4)}-${randomUUID()}.bin`;
+  const knownFilename = (chatId, file) => file === filename(chatId) ||
+    (typeof file === 'string' && file.startsWith(filename(chatId).slice(0, -4) + '-') && /^[a-f0-9-]+\.bin$/.test(file));
   const persist = () => {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const temp = `${indexFile}.${randomUUID()}.tmp`;
@@ -41,7 +44,7 @@ export function createSessionSnapshots({ root, localInstances, log = () => {}, f
     const attempt = `${chatId}:${inst.loadedAt}`;
     if (attempted.has(attempt)) return false;
     attempted.add(attempt);
-    if (row.file !== filename(chatId) || !existsSync(join(directory, row.file))) return false;
+    if (!knownFilename(chatId, row.file) || !existsSync(join(directory, row.file))) return false;
     try {
       const result = await transfer(inst, 'restore', row.file);
       if (!(Number(result.n_restored) > 0)) return false;
@@ -54,23 +57,27 @@ export function createSessionSnapshots({ root, localInstances, log = () => {}, f
       return false; // the engine reads the ordinary prompt; no history is lost
     }
   }
-  function save(chatId, sessionId, route, tokens) {
+  function supported(route) { return !!instanceFor(route); }
+  function save(chatId, sessionId, route, tokens, { force = false } = {}) {
     const inst = instanceFor(route);
-    if (!inst || !(tokens >= MIN_SNAPSHOT_TOKENS) || pending.has(chatId)) return null;
+    if (!inst || (!force && !(tokens >= MIN_SNAPSHOT_TOKENS)) || pending.has(chatId)) return null;
     try { mkdirSync(directory, { recursive: true, mode: 0o700 }); } catch { return null; }
     discarded.delete(chatId);
-    const file = filename(chatId);
+    const file = newFilename(chatId);
     const job = (async () => {
       try {
         const result = await transfer(inst, 'save', file);
         if (!(Number(result.n_saved) > 0)) return false;
         if (discarded.has(chatId)) { rmSync(join(directory, file), { force: true }); return false; }
         try { chmodSync(join(directory, file), 0o600); } catch { /* engine created the file privately */ }
+        const old = records[chatId]?.file;
         records[chatId] = { file, sessionId, modelId: inst.modelId, loadedAt: inst.loadedAt, tokens: result.n_saved };
         persist();
+        if (old && knownFilename(chatId, old) && old !== file) try { rmSync(join(directory, old), { force: true }); } catch { /* the new file is authoritative */ }
         log(`agent · saved ${result.n_saved} prompt tokens for fast local resume`);
         return true;
       } catch (error) {
+        try { rmSync(join(directory, file), { force: true }); } catch { /* best effort */ }
         log(`agent · session save unavailable: ${error.message}`);
         return false;
       }
@@ -79,15 +86,20 @@ export function createSessionSnapshots({ root, localInstances, log = () => {}, f
     void job.finally(() => { if (pending.get(chatId) === job) pending.delete(chatId); });
     return job;
   }
+  function cancel(chatId) {
+    if (!pending.has(chatId)) return false;
+    discarded.add(chatId);
+    return true;
+  }
   function forget(chatId) {
     discarded.add(chatId);
     const row = records[chatId];
     delete records[chatId];
     if (row) {
-      try { rmSync(join(directory, filename(chatId)), { force: true }); } catch { /* best effort */ }
+      if (knownFilename(chatId, row.file)) try { rmSync(join(directory, row.file), { force: true }); } catch { /* best effort */ }
       try { persist(); } catch { /* best effort */ }
     }
   }
   async function close() { await Promise.allSettled([...pending.values()]); }
-  return { restore, save, forget, close, directory };
+  return { restore, save, cancel, supported, forget, close, directory };
 }

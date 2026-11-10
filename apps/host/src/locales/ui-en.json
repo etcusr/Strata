@@ -57,5 +57,19 @@
  "ui56": "Response time",
  "ui57": "Tools used",
  "ui58": "Generating model output…",
- "ui59": "Local model busy with another request…"
+ "ui59": "Local model busy with another request…",
+ "ui60": "Saving context",
+ "ui61": "Press Stop again to skip saving and finish.",
+ "ui62": "Context saved",
+ "ui63": "The chat can resume faster after the model reloads.",
+ "ui64": "Context save skipped",
+ "ui65": "The chat history is still saved.",
+ "ui66": "Context could not be saved",
+ "ui67": "Skip saving",
+ "ui68": "Finishing…",
+ "ui69": "Stopping the answer, then saving context… Press Stop again to skip.",
+ "ui70": "Saving context… Press Stop again to skip.",
+ "ui71": "Skipping context save…",
+ "ui72": "Extra RAM for conversation saves",
+ "ui73": "Reduces the free-memory reserve for saving conversations. More RAM may make other apps slower."
 }

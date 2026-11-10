@@ -479,6 +479,8 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const turn = {
       sessionId, projector, route, requestId, live: false, lastSeq: -1,
       ended: deferred(), follow: null, snapshot: deferred(), finished: false, prompted: false, stopBeforePrompt: false,
+      saveOnStop: false, skipSnapshot: false, snapshotSaving: false, snapshotSkip: deferred(),
+      showSaveStatus: (code, text) => reporter.set({ phase: 'saving', code, text }),
       abortFromRuntime: reason => finishTurn(reason), finish: failure => finishTurn(failure),
       // Helper agents (subagents) the Harness started for this chat, and the state of the run around them.
       children: new Map(), subagentCalls: new Map(), parentOpen: false, stopping: false, settleTimer: null, mode: appliedMode,
@@ -538,7 +540,6 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
       turn.follow?.close();
       for (const child of turn.children.values()) child.follow?.close();
       if (turn.stopping && !failure) projector.ended = turn.guard ? { kind: 'completed' } : { kind: 'aborted', reason: { kind: 'user' } };
-      reporter.clear();
       const extra = [];
       try { if (toolsRan) for (const d of tracker.sweep()) { emit(d); groups.addFile(d); } } catch { /* never blocks the end of a turn */ }
       if (workspacePath) folderClaims.end(workspacePath, chatId);
@@ -562,7 +563,19 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       for (const f of extra) emit(f);
       // The answer speed of a turn on this computer is the engine's own (tokens it produced over its decode time, as the Monitor shows it).
       const engine = !failure && route.kind === 'local' ? await engineSpeedOf(route, projector) : null;
+      if (!failure && turn.saveOnStop && !turn.skipSnapshot && activeTurns() === 1) {
+        turn.snapshotSaving = true;
+        turn.showSaveStatus('saving-context', 'Saving context… Press Stop again to skip.');
+        const job = snapshots.save(chatId, sessionId, route, projector.contextTokens, { force: true });
+        const saved = job ? await Promise.race([job, turn.snapshotSkip.promise]) : false;
+        turn.snapshotSaving = false;
+        if (turn.skipSnapshot) snapshots.cancel(chatId);
+        emit({ type: 'context-snapshot', state: turn.skipSnapshot ? 'skipped' : saved ? 'saved' : 'unavailable' });
+      } else if (turn.saveOnStop && turn.skipSnapshot) {
+        emit({ type: 'context-snapshot', state: 'skipped' });
+      }
       const frames = failure ? [{ type: 'error', message: plainAgentFailure(failure), details: failure, code: 'AGENT_STOPPED' }] : projector.finish({ model: route.name, contextMax: route.contextWindow, engine });
+      reporter.clear();
       for (const f of frames.slice(0, -1)) emit(f);
       // Messages typed while the goal ran and not delivered between steps go back to the page now, to be sent as ordinary messages.
       if (turn.goalRun && attached) {
@@ -575,10 +588,11 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       c.last = { requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), terminal };
       turn.ended.resolve({ reason: projector.ended, failure: failure ?? null });
       notifyIdle();
-      if (!failure && !noteReason && !cutEnd && !turn.stopping && route.kind === 'local' && activeTurns() === 0)
+      if (!failure && !noteReason && !cutEnd && !turn.stopping && !turn.forgetOnEnd && route.kind === 'local' && activeTurns() === 0)
         void snapshots.save(chatId, sessionId, route, projector.contextTokens);
       // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
       if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId);
+      if (turn.forgetOnEnd) forget(chatId);
     }
 
     emit({ type: 'start', model: route.name, contextMax: route.contextWindow, demo: false, remoteModel: route.kind === 'api', agent: true, mode: appliedMode, sessionId, requestId, skills: [], ...(planTask ? { planning: true } : {}) });
@@ -1501,11 +1515,18 @@ ${note.text}
     } catch (e) { log(`agent · compact after a stopped turn failed: ${e.message}`); }
   }
 
-  async function stop(chatId, { waitMs = 20_000 } = {}) {
+  async function stop(chatId, { waitMs = 20_000, saveOnStop = false } = {}) {
     const c = chats.get(chatId);
     const turn = c?.turn;
     if (!turn && c?.starting) { c.cancelStart = true; return { stopped: true, ended: 'cancelled-before-start', ms: 0 }; }
     if (!turn || !rt) return { stopped: false, reason: 'no active turn' };
+    if (turn.stopping && turn.saveOnStop && saveOnStop) {
+      turn.skipSnapshot = true;
+      snapshots.cancel(chatId);
+      turn.snapshotSkip.resolve(false);
+      turn.showSaveStatus('skipping-context', 'Skipping context save…');
+      return { stopped: true, skipped: true };
+    }
     const t0 = Date.now();
     if (!turn.prompted) {
       // The Harness has not been given the prompt yet, so there is nothing to cancel there.
@@ -1514,12 +1535,21 @@ ${note.text}
       if (early) return { stopped: true, ended: early.reason?.kind ?? 'aborted', ms: Date.now() - t0 };
     }
     turn.stopping = true;
-    await pauseGoal(rt, turn.sessionId, chatId);
-    // Helpers first: a helper still working would otherwise report back and wake the parent again.
-    await Promise.allSettled([...turn.children.values()].filter(h => !h.done).map(h => rt.gw.rpc('subagents/interruptByParent', { childSessionId: h.id, parentSessionId: turn.sessionId, mode: 'continuable' })));
-    await rt.gw.rpc('session/cancel', { request: { sessionId: turn.sessionId } }).catch(e => { if (turn.parentOpen) throw e; });
-    // Nothing is running in the parent (it was waiting for its helpers): the run ends once they are all down.
-    if (!turn.parentOpen) { clearTimeout(turn.settleTimer); turn.settleTimer = after(300, () => { if (!turn.finished && !turn.parentOpen && [...turn.children.values()].every(h => h.done)) turn.finish(null); }); }
+    turn.saveOnStop = saveOnStop && turn.prompted && turn.route.kind === 'local' && snapshots.supported(turn.route) && activeTurns() === 1;
+    if (turn.saveOnStop) turn.showSaveStatus('stopping-to-save', 'Stopping the answer, then saving context… Press Stop again to skip.');
+    const cancelWork = async () => {
+      await pauseGoal(rt, turn.sessionId, chatId);
+      // Helpers first: a helper still working would otherwise report back and wake the parent again.
+      await Promise.allSettled([...turn.children.values()].filter(h => !h.done).map(h => rt.gw.rpc('subagents/interruptByParent', { childSessionId: h.id, parentSessionId: turn.sessionId, mode: 'continuable' })));
+      await rt.gw.rpc('session/cancel', { request: { sessionId: turn.sessionId } }).catch(e => { if (turn.parentOpen) throw e; });
+      // Nothing is running in the parent (it was waiting for its helpers): the run ends once they are all down.
+      if (!turn.parentOpen) { clearTimeout(turn.settleTimer); turn.settleTimer = after(300, () => { if (!turn.finished && !turn.parentOpen && [...turn.children.values()].every(h => h.done)) turn.finish(null); }); }
+    };
+    if (turn.saveOnStop) {
+      void cancelWork().catch(e => turn.finish(`Could not stop the agent: ${e.message}`));
+      return { stopped: true, saving: true, ms: Date.now() - t0 };
+    }
+    await cancelWork();
     let timer; const result = await Promise.race([turn.ended.promise, new Promise(r => { timer = after(waitMs, () => r(null)); })]);
     clearTimeout(timer);
     if (!result) return { stopped: false, pending: true, reason: 'the turn is still stopping' };
@@ -1574,7 +1604,19 @@ ${note.text}
   }
 
   /** Let go of a chat's Harness session mapping (a task starts every run in a session of its own). */
-  function forget(chatId) { if (chats.get(chatId)?.turn) return; snapshots.forget(chatId); delete sessionMap[chatId]; chats.delete(chatId); persist(); }
+  function forget(chatId) {
+    const turn = chats.get(chatId)?.turn;
+    if (turn) {
+      turn.forgetOnEnd = true;
+      turn.saveOnStop = false;
+      turn.skipSnapshot = true;
+      turn.snapshotSkip.resolve(false);
+      snapshots.forget(chatId);
+      return;
+    }
+    snapshots.forget(chatId);
+    delete sessionMap[chatId]; chats.delete(chatId); persist();
+  }
 
   return { compactCommand, messageHelper, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
 }

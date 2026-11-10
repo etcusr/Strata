@@ -351,7 +351,7 @@ let state: AppState = {
 const listeners = new Set<() => void>();
 
 /** Chats with a turn in flight: the abort handle, and whether the host is running it as an agent turn. */
-const liveTurns = new Map<string, { abort: AbortController; agent: boolean }>();
+const liveTurns = new Map<string, { abort: AbortController; agent: boolean; stopClicks?: number }>();
 
 function set(patch: Partial<AppState> | ((s: AppState) => Partial<AppState>)) {
   const before = state.activeSession;
@@ -1685,19 +1685,27 @@ function markTurn(sessionId: string, turn: { abort: AbortController; agent: bool
  * Harness session and answers only once the turn has ended, and the stream then closes by itself with
  * what was produced. For any other turn the host reports nothing to stop and the request is aborted.
  */
-export function stopStreaming() {
-  const id = state.activeSession;
-  const turn = id ? liveTurns.get(id) : undefined;
-  if (!id || !turn) return;
+function requestStop(id: string, turn: { abort: AbortController; agent: boolean; stopClicks?: number }) {
+  const click = turn.stopClicks = (turn.stopClicks ?? 0) + 1;
   const abort = () => { turn.abort.abort(); };
-  void api.post<{ stopped: boolean }>('/api/chat/stop', { sessionId: id }).then(
+  void api.post<{ stopped: boolean; saving?: boolean; skipped?: boolean }>('/api/chat/stop', { sessionId: id }).then(
     result => {
       if (!result.stopped) abort();
-      // An agent turn that was told to stop but is slow to end must not leave the chat stuck.
-      else setTimeout(() => { if (liveTurns.get(id) === turn) abort(); }, 30000);
+      else if (result.saving) {
+        if (turn.stopClicks === click) pushToast('info', tr('Saving context'), tr('Press Stop again to skip saving and finish.'));
+      } else if (!result.skipped) {
+        // A non-agent turn that was told to stop but is slow to end must not leave the chat stuck.
+        setTimeout(() => { if (liveTurns.get(id) === turn) abort(); }, 30000);
+      }
     },
     abort,
   );
+}
+
+export function stopStreaming() {
+  const id = state.activeSession;
+  const turn = id ? liveTurns.get(id) : undefined;
+  if (id && turn) requestStop(id, turn);
 }
 
 /**
@@ -1894,11 +1902,7 @@ export function loopChatIds(): string[] { return loopScheduler.ids(); }
 export function stopChat(id: string) {
   const turn = liveTurns.get(id);
   if (!turn) return;
-  const abort = () => { turn.abort.abort(); };
-  void api.post<{ stopped: boolean }>('/api/chat/stop', { sessionId: id }).then(
-    result => { if (!result.stopped) abort(); else setTimeout(() => { if (liveTurns.get(id) === turn) abort(); }, 30000); },
-    abort,
-  );
+  requestStop(id, turn);
 }
 
 /** Stop a chat's loop from the board. The chat gets the same line /loop stop writes. */
@@ -2179,6 +2183,10 @@ export async function sendMessage(text: string, options: { fromLoop?: boolean; g
           // The host says why this chat is not using the agent. One toast per reason per page load.
           const code = String(frame.code ?? 'notice');
           if (!noticed.has(code)) { noticed.add(code); pushToast('info', 'Agent', plainFailureText(String(frame.message ?? '')).message); }
+        } else if (type === 'context-snapshot') {
+          if (frame.state === 'saved') pushToast('success', tr('Context saved'), tr('The chat can resume faster after the model reloads.'));
+          else if (frame.state === 'skipped') pushToast('info', tr('Context save skipped'), tr('The chat history is still saved.'));
+          else pushToast('info', tr('Context could not be saved'), tr('The chat history is still saved.'));
         } else if (type === 'agent-question') {
           addAgentAsk(sessionId, frame as { callId?: unknown; questions?: unknown });
         } else if (type === 'agent-question-end') {

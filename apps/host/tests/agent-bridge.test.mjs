@@ -29,11 +29,11 @@ function cleanup(dir) {
 
 const lines = file => readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).length;
 
-async function rig(t, { connections = [], dataDir } = {}) {
-  const worker = await startScriptedWorker({});
+async function rig(t, { connections = [], dataDir, slotSave = null } = {}) {
+  const worker = await startScriptedWorker({ slotSave });
   const dir = dataDir ?? mkdtempSync(join(tmpdir(), 'strata-agent-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
-  const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768 }];
+  const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, ...(slotSave ? { snapshotEnabled: true, slots: 1, loadedAt: 'test-load' } : {}) }];
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => connections, env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); if (!dataDir) cleanup(dir); });
   const run = (chatId, message, opts = {}) => {
@@ -126,6 +126,39 @@ test('A05 Stop cancels exactly that chat, waits for the turn to end, and leaves 
   // And A can be used again.
   const again = r.run('chat-a05-a', 'SCRIPT:echo after stop'); await again.promise;
   assert.equal(text(again.frames), 'after stop');
+});
+
+test('Stop saves a supported local session before ending the turn', { skip }, async t => {
+  const r = await rig(t, { slotSave: async () => ({ n_saved: 40_000 }) });
+  const run = r.run('chat-stop-save', 'SCRIPT:slow 400');
+  assert.ok(await until(() => run.frames.some(f => f.type === 'delta'), 15_000));
+  const first = await r.bridge.stop('chat-stop-save', { saveOnStop: true });
+  assert.equal(first.saving, true);
+  await run.promise;
+  assert.equal(r.worker.slotRequests.length, 1);
+  assert.ok(run.frames.some(f => f.type === 'context-snapshot' && f.state === 'saved'));
+  assert.equal(run.frames.at(-1).type, 'done');
+  assert.ok(JSON.parse(readFileSync(join(r.dir, 'agent', 'session-snapshots.json'), 'utf8')).records['chat-stop-save']);
+});
+
+test('a second Stop skips the in-progress snapshot and finishes promptly', { skip }, async t => {
+  let release;
+  const saving = new Promise(resolve => { release = resolve; });
+  t.after(() => release({ n_saved: 40_000 }));
+  const r = await rig(t, { slotSave: () => saving });
+  const run = r.run('chat-stop-skip', 'SCRIPT:slow 400');
+  assert.ok(await until(() => run.frames.some(f => f.type === 'delta'), 15_000));
+  assert.equal((await r.bridge.stop('chat-stop-skip', { saveOnStop: true })).saving, true);
+  assert.ok(await until(() => r.worker.slotRequests.length === 1, 15_000), 'the save has started');
+  const started = Date.now();
+  assert.equal((await r.bridge.stop('chat-stop-skip', { saveOnStop: true })).skipped, true);
+  await run.promise;
+  assert.ok(Date.now() - started < 3_000, 'the chat ends without waiting for the disk save');
+  assert.ok(run.frames.some(f => f.type === 'context-snapshot' && f.state === 'skipped'));
+  release({ n_saved: 40_000 });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const index = join(r.dir, 'agent', 'session-snapshots.json');
+  assert.ok(!existsSync(index) || !JSON.parse(readFileSync(index, 'utf8')).records['chat-stop-skip']);
 });
 
 test('A05b Stop while an approval is pending denies it and ends the turn', { skip }, async t => {

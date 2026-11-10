@@ -9,7 +9,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -84,6 +85,28 @@ async function setup(t, { harness = HARNESS, reuse } = {}) {
 const toolStates = (frames, id) => frames.filter(f => f.type === 'agent-tool' && (!id || f.tool.id === id)).map(f => f.tool.state);
 const text = frames => frames.filter(f => f.type === 'delta').map(f => f.text).join('');
 const lines = file => readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean).length;
+
+test('deleting a chat also removes its saved engine session file', async t => {
+  const home = mkdtempSync(join(tmpdir(), 'strata-delete-snapshot-'));
+  t.after(() => cleanup(home));
+  const chatId = 'chat-delete-snapshot';
+  const agentDir = join(home, 'data', 'agent');
+  const fileDir = join(agentDir, 'session-files');
+  mkdirSync(fileDir, { recursive: true });
+  const file = `${createHash('sha256').update(chatId).digest('hex').slice(0, 32)}.bin`;
+  writeFileSync(join(fileDir, file), 'saved engine state');
+  writeFileSync(join(agentDir, 'session-snapshots.json'), JSON.stringify({ records: { [chatId]: { file, sessionId: 'test-session', modelId: 'test-model', loadedAt: 'old', tokens: 100 } } }));
+  const ws = join(home, 'workspace'); mkdirSync(ws);
+  const host = await startHost(t, { home, ws, harness: null });
+  const headers = { 'x-strata-client': 'test' };
+  const saved = await fetch(`${host.base}/api/chats/${chatId}`, { method: 'PUT', headers, body: JSON.stringify({ id: chatId, title: 'Delete test' }) });
+  assert.equal(saved.status, 200);
+  const deleted = await fetch(`${host.base}/api/chats/${chatId}`, { method: 'DELETE', headers });
+  assert.equal(deleted.status, 200);
+  assert.equal((await deleted.json()).removed, true);
+  assert.equal(existsSync(join(fileDir, file)), false);
+  assert.equal(JSON.parse(readFileSync(join(agentDir, 'session-snapshots.json'), 'utf8')).records[chatId], undefined);
+});
 
 test('a message steers the active agent turn and does not start another turn', { skip }, async t => {
   const s = await setup(t);

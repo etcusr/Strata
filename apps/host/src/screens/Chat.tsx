@@ -624,6 +624,7 @@ function Composer({ draft, setDraft, loaded, streaming, onSubmit, onSteer, steer
     textareaRef: React.RefObject<HTMLTextAreaElement | null>;
 }) {
     const clearDraft = useCallback(() => setDraft(''), [setDraft]);
+    const stopStatus = useLiveStatus(session?.id);
     const photos = useChatPhotos(session?.id), native = useNative();
     const canChat = loaded || native?.instances.some(i => i.status === 'ready');
     const whileBusy = useStore(s => s.whileBusy), parkedList = useStore(s => (session ? s.parked[session.id] : undefined)) ?? NO_PARKED;
@@ -710,7 +711,7 @@ function Composer({ draft, setDraft, loaded, streaming, onSubmit, onSteer, steer
         }}/>
           <div className="st-composer__bar">
             <ComposerControls draft={draft} onDraft={setDraft} session={session} onPreview={onPreview} streaming={streaming} onSlash={() => { setSlashDismissed(false); setSlashOpen(true); requestAnimationFrame(() => textareaRef.current?.focus()); }} onError={setFileError} onAttach={(name, text) => { setDraft(`${draft}${draft ? '\n\n' : ''}Attached ${name}\n\n${text}`); requestAnimationFrame(() => textareaRef.current?.focus()); }}/>
-            {tr(streaming ? <>{isAgentTurn(session?.id) && draft.trim() ? <Btn variant="primary" size="sm" icon="send" disabled={steering || draft.trim().length > 8000 || !!photos.length} onClick={onSteer}>{tr("Add to task")}</Btn> : null}<Btn variant="secondary" size="sm" icon="stop" onClick={stopStreaming}>{tr("Stop")}</Btn></> : (<Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr("Send")}</Btn>))}
+            {tr(streaming ? <>{isAgentTurn(session?.id) && draft.trim() ? <Btn variant="primary" size="sm" icon="send" disabled={steering || draft.trim().length > 8000 || !!photos.length} onClick={onSteer}>{tr("Add to task")}</Btn> : null}<Btn variant="secondary" size="sm" icon="stop" disabled={stopStatus?.code === 'skipping-context'} onClick={stopStreaming}>{tr(stopStatus?.code === 'saving-context' || stopStatus?.code === 'stopping-to-save' ? 'Skip saving' : stopStatus?.code === 'skipping-context' ? 'Finishing…' : 'Stop')}</Btn></> : (<Btn variant="primary" size="sm" icon="send" disabled={(!draft.trim() && !photos.length) || draft.trim() === '/' || (!canChat && timeSkipPrompt(draft) === null)} onClick={onSubmit}>{tr("Send")}</Btn>))}
           </div>
         </div>
         {tr(streaming && draft.trim() && whileBusy !== 'wait' ? <p className="xs muted composer__busy-hint" role="status">{tr(whileBusy === 'queue' || whileBusy === 'steer' && !isAgentTurn(session?.id) ? "Enter sends it when the answer is done." : whileBusy === 'steer' ? "Enter adds it to the current task without stopping it." : "Enter stops the answer here and sends it now.")}</p> : null)}
