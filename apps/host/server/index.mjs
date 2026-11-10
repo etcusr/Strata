@@ -215,6 +215,7 @@ const agent = createAgentBridge({
   localInstances: () => native.readyInstances().map(i => ({
     id: i.id, label: i.label, baseUrl: `http://127.0.0.1:${i.port}/v1`, modelId: i.apiModelId,
     context: agentLocalContext(i.metrics?.engine?.max_context ?? i.context), key: i.key, vision: i.vision,
+    loadedAt: i.loadedAt, snapshotEnabled: i.snapshotEnabled === true,
     // The engine's request slots: helper agents never outnumber them.
     slots: i.metrics?.live?.slots?.length || i.parallel || 1,
     // The tool servers set up for this model (Settings, Tools): the agent connects to the same ones.

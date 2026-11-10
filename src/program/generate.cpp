@@ -11971,7 +11971,21 @@ int main(int argc, char** argv) {
                 in.embedding = o.embd_gguf;
                 in.ple = o.ple_gguf;
                 in.pack = o.pack;
-                in.mtp = o.mtp.empty() ? std::string() : o.mtp + "/dense.bin";
+                if (!o.mtp.empty()) {
+#if defined(STRATA_GPU_METAL)
+                    // The Metal drafter loads the GGUF beside the rt directory, or the explicit override.
+                    // The CUDA rt/dense.bin files are not created by Mac setup.
+                    if (const char* override_path = std::getenv("STRATA_METAL_MTP_GGUF"))
+                        in.mtp = override_path;
+                    else {
+                        std::string rt = o.mtp;
+                        while (!rt.empty() && rt.back() == '/') rt.pop_back();
+                        in.mtp = (std::filesystem::path(rt).parent_path() / "mtp-q2_0.gguf").string();
+                    }
+#else
+                    in.mtp = o.mtp + "/dense.bin";
+#endif
+                }
                 if (srcp != nullptr) in.experts = srcp->model_inputs();
                 std::vector<strata::core::SessionModelFile> files = strata::core::session_model_inputs(in);
                 // the pack's other files the loader reads (weights.cpp, expert_layout.cpp)
@@ -11982,8 +11996,11 @@ int main(int argc, char** argv) {
                     if (srcp == nullptr) files.push_back({"pack experts.bin", o.pack + "/experts.bin", true});
                 }
                 if (!o.mtp.empty()) {
+#if !defined(STRATA_GPU_METAL)
                     for (const char* n : {"dense.txt", "experts.bin"}) files.push_back({std::string("mtp ") + n, o.mtp + "/" + n});
-                    files.push_back({"mtp draft_vocab.bin", o.mtp + "/draft_vocab.bin", true});
+#endif
+                    files.push_back({"mtp draft_vocab.bin",
+                                     o.mtp_draft_vocab.empty() ? o.mtp + "/draft_vocab.bin" : o.mtp_draft_vocab, true});
                 }
                 uint64_t fp = 0;
                 // each file is one blocking read of at most 2 MiB (head and tail): announced before it starts
@@ -11995,7 +12012,9 @@ int main(int argc, char** argv) {
             if (!config_fp) {
                 strata::core::SessionConfig c;
                 c.engine_version = STRATA_VERSION;
-#if defined(STRATA_USE_HIP)
+#if defined(STRATA_GPU_METAL)
+                c.backend = "metal";
+#elif defined(STRATA_USE_HIP)
                 c.backend = "hip";
 #else
                 c.backend = "cuda";

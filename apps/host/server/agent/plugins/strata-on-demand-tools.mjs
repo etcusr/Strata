@@ -8,7 +8,13 @@
 export const name = 'strata-on-demand-tools';
 export const inject = ['tools', 'llm'];
 
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+
 const groups = new Map();
+const used = new Map();
+const recent = new Map();
 const CATALOG = 'tool_catalog';
 const wrappedFetch = new WeakSet();
 export const CATEGORIES = ['files', 'shell', 'jobs', 'web', 'browser', 'devtools', 'skills', 'helpers', 'goals', 'questions', 'todo', 'present', 'connected'];
@@ -34,7 +40,9 @@ export function visibleTools(sessionId, tools) {
   if (!Array.isArray(tools)) return tools;
   const selected = groups.get(String(sessionId)) ?? new Set();
   const hasMore = tools.some(tool => tool.name !== CATALOG);
-  return tools.filter(tool => (tool.name === CATALOG && hasMore) || selected.has('all') || selected.has(category(tool.name)));
+  // A resumed task may need to inspect a background job before it has a chance to load a group. This one
+  // small read-only schema also lets it recover when the Harness was restarted and the in-memory selection is gone.
+  return tools.filter(tool => (tool.name === CATALOG && hasMore) || tool.name === 'job_list' || selected.has('all') || selected.has(category(tool.name)));
 }
 
 export function filteredHeader(sessionId, header) {
@@ -61,7 +69,28 @@ export function compactJsonBody(body, maxChars = 7800) {
   return `Structured JSON condensed: the response is too large to show in full. Top-level fields: ${Object.keys(value ?? {}).slice(0, 30).join(', ')}.\n${JSON.stringify(shrink(value, 1, 4, 50)).slice(0, maxChars - 200)}`;
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  const stateFile = typeof config.stateFile === 'string' ? config.stateFile : null;
+  if (stateFile) {
+    try {
+      const saved = JSON.parse(readFileSync(stateFile, 'utf8'));
+      const cutoff = Date.now() - 30 * 86400_000;
+      for (const [id, row] of Object.entries(saved.sessions ?? {})) {
+        if (row.at >= cutoff && Array.isArray(row.groups)) recent.set(id, new Set(row.groups.filter(group => CATEGORIES.includes(group))));
+      }
+    } catch { /* A missing or damaged cache only costs the next tool_catalog call. */ }
+  }
+  const persist = () => {
+    if (!stateFile) return;
+    try {
+      const sessions = Object.fromEntries([...recent.entries()].slice(-1000).map(([id, selected]) =>
+        [id, { at: Date.now(), groups: [...selected] }]));
+      mkdirSync(dirname(stateFile), { recursive: true });
+      const temp = `${stateFile}.${randomUUID()}.tmp`;
+      writeFileSync(temp, JSON.stringify({ version: 1, sessions }), { mode: 0o600 });
+      renameSync(temp, stateFile);
+    } catch { /* Tool availability must not depend on a writable state file. */ }
+  };
   const wrapFetch = () => {
     let agents;
     try { agents = ctx.get('agents')?.list?.() ?? []; } catch { return; }
@@ -106,7 +135,19 @@ export function apply(ctx) {
     },
   });
   ctx.on('session/event', (session, event) => {
-    if (event.type === 'turn/start') groups.delete(String(session.id));
+    const id = String(session.id);
+    if (event.type === 'turn/start') {
+      groups.set(id, new Set(recent.get(id) ?? []));
+      used.set(id, new Set());
+    } else if (event.type === 'tool/call' && event.data?.name && event.data.name !== CATALOG) {
+      const group = category(event.data.name);
+      used.get(id)?.add(group);
+      groups.get(id)?.add(group);
+    } else if (event.type === 'turn/end') {
+      recent.set(id, used.get(id) ?? new Set());
+      used.delete(id);
+      persist();
+    }
   });
   if (typeof ctx.llm.prepareCall === 'function') {
     const original = ctx.llm.prepareCall;

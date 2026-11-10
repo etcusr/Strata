@@ -118,7 +118,7 @@ test('on-demand categories separate browser backends and hide unrequested schema
   assert.equal(category('mcp__browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
-  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'bash' }, { name: 'web_search' }]).map(t => t.name), ['tool_catalog']);
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'job_list']);
 });
 
 test('large JSON web results are condensed before the model sees them', async () => {
@@ -197,23 +197,36 @@ test('on-demand tools load for one turn and leave a later greeting small', { ski
   const frames = await r.run('catalog', 'SCRIPT:call tool_catalog {"groups":["files","shell"]}');
   assert.match(last(frames).result, /BatchMode=yes/);
   const first = r.worker.requests.at(-2), loaded = r.worker.requests.at(-1);
-  assert.deepEqual(first.toolNames, ['tool_catalog']);
+  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog']);
   assert.ok(loaded.toolNames.includes('read') && loaded.toolNames.includes('bash'));
   assert.ok(!loaded.toolNames.includes('web_search') && !loaded.toolNames.includes('subagent'));
   await r.run('catalog', 'SCRIPT:hello');
   const greeting = r.worker.requests.at(-1);
-  assert.deepEqual(greeting.toolNames, ['tool_catalog']);
+  assert.deepEqual(greeting.toolNames, ['job_list', 'tool_catalog']);
   assert.ok(greeting.promptChars < 7000, 'a short reply does not carry the full tool catalog');
   const fresh = await r.run('fresh-hello', 'SCRIPT:hello');
   const shown = fresh.filter(f => f.type === 'context').at(-1)?.contextTokens;
   assert.ok(shown > 0 && shown < 2000, `the context meter reads the compact request (${shown})`);
 });
 
+test('on-demand tools keep the group actually used by the previous turn', { skip }, async (t) => {
+  const r = await rig(t, { onDemand: true });
+  await r.run('jobs-resume', 'SCRIPT:call job_list {}');
+  const first = r.worker.requests.at(-2);
+  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog']);
+  const saved = JSON.parse(readFileSync(join(r.dir, 'agent', 'tool-groups.json'), 'utf8'));
+  assert.ok(Object.values(saved.sessions).some(row => row.groups.includes('jobs')));
+  await r.run('jobs-resume', 'SCRIPT:hello');
+  const resumed = r.worker.requests.at(-1);
+  assert.ok(resumed.toolNames.includes('job_output') && resumed.toolNames.includes('job_kill'));
+  assert.ok(!resumed.toolNames.includes('bash') && !resumed.toolNames.includes('web_search'));
+});
+
 test('on-demand connected tools stay hidden until the model requests them', { skip }, async (t) => {
   const mcpServers = { demo: { command: process.execPath, args: [fwd(join(import.meta.dirname, 'helpers', 'mini-mcp.mjs'))] } };
   const r = await rig(t, { onDemand: true, mcpServers });
   await r.run('mcp-catalog', 'SCRIPT:call tool_catalog {"groups":["connected"]}');
-  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['tool_catalog']);
+  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['job_list', 'tool_catalog']);
   const loaded = r.worker.requests.at(-1).toolNames;
   assert.ok(loaded.includes('mcp__demo__shout'));
   assert.ok(!loaded.includes('bash') && !loaded.includes('web_search'));
@@ -224,7 +237,7 @@ test('a short web task sends small requests even after loading web tools', { ski
   await r.run('weather', 'SCRIPT:weather');
   const requests = r.worker.requests;
   assert.equal(requests.length, 4, 'catalog, search, fetch, answer');
-  assert.deepEqual(requests[0].toolNames, ['tool_catalog']);
+  assert.deepEqual(requests[0].toolNames, ['job_list', 'tool_catalog']);
   assert.ok(requests.slice(1).every(q => q.toolNames.includes('web_search') && q.toolNames.includes('web_fetch')));
   assert.ok(requests.every(q => q.promptChars < 8000), 'the whole built-in tool inventory is never sent');
   assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 28_000, 'the extra catalog step still costs less than one old full-tool request');

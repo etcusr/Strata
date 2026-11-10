@@ -29,6 +29,7 @@ import { nearestBudget } from './llm-shape.mjs';
 import { DeliverableTracker, ActivityGroups, FolderClaims } from './deliverables.mjs';
 import { SkillsUsed, skillInfoFrom } from './skills-used.mjs';
 import { turnEngineSpeed } from './engine-speed.mjs';
+import { createSessionSnapshots } from './session-snapshots.mjs';
 import { TurnGuard, guardNote, GUARD_NOTES } from './turn-guard.mjs';
 import { cutNotice, cutNudge } from './reply-cut.mjs';
 
@@ -128,6 +129,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   const home = join(root, 'home');
   const sessionsFile = join(root, 'sessions.json');
   mkdirSync(root, { recursive: true });
+  const snapshots = createSessionSnapshots({ root, localInstances, log });
   /** Which chat's file tools wrote which file, for chats that share a folder (#5008). */
   const folderClaims = new FolderClaims();
 
@@ -183,7 +185,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** The agent's profile now, plus where its shaped routes really lead (read by the forwarding endpoint). */
   let shapeTargets = {};
   function buildProfileNow() {
-    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
+    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId(), toolGroupsFile: join(root, 'tool-groups.json') });
     shapeTargets = profile.shapeTargets ?? {};
     return profile;
   }
@@ -419,6 +421,14 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const cancelled = () => { reporter.clear(); emit({ type: 'done', finishReason: 'aborted', cancelled: true, tokensIn: null, tokensOut: null, usageSource: 'unavailable', durationMs: 0, model: route.name, contextMax: route.contextWindow }); return { cancelled: true }; };
     if (c.cancelStart || !made) return cancelled();
 
+    // A checkpoint from a previous engine load restores the KV state before the Harness sends its next model request.
+    // The engine validates model/version/settings and still compares tokens on the next request; any refusal falls back
+    // to ordinary prompt reading without changing the chat history.
+    if (route.kind === 'local' && !fresh) {
+      reporter.set({ phase: 'starting', code: 'restoring-session', text: 'Checking saved context…' });
+      await snapshots.restore(chatId, sessionId, route);
+    }
+
     // The model and the chat's thinking level (the Reasoning menu) are sent to the Harness when either changed. A level the route does
     // not have (an API model with its own vocabulary) is dropped and the model's own default stands: never an error for the person.
     const level = effortOf(thinking ?? 'Medium');   // the menu's default is Medium
@@ -565,6 +575,8 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       c.last = { requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), terminal };
       turn.ended.resolve({ reason: projector.ended, failure: failure ?? null });
       notifyIdle();
+      if (!failure && !noteReason && !cutEnd && !turn.stopping && route.kind === 'local' && activeTurns() === 0)
+        void snapshots.save(chatId, sessionId, route, projector.contextTokens);
       // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
       if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId);
     }
@@ -1208,7 +1220,7 @@ ${note.text}
   /** Forget the chat's agent session (not its plan): the next turn starts a fresh one in the same folder. */
   function resetSession(chatId) {
     if (chats.get(chatId)?.turn || chats.get(chatId)?.starting) throw new AgentUnavailable('This chat is still working.', 'turn-active');
-    delete sessionMap[chatId]; persist();
+    delete sessionMap[chatId]; persist(); snapshots.forget(chatId);
   }
 
   // -- the agent's own questions ------------------------------------------------------------------------------
@@ -1556,12 +1568,13 @@ ${note.text}
   }
 
   async function close() {
+    await snapshots.close();
     const r = rt; rt = null;
     if (r) { r.events?.close(); r.gw.close(); await r.hp.stop(); }
   }
 
   /** Let go of a chat's Harness session mapping (a task starts every run in a session of its own). */
-  function forget(chatId) { if (chats.get(chatId)?.turn) return; delete sessionMap[chatId]; chats.delete(chatId); persist(); }
+  function forget(chatId) { if (chats.get(chatId)?.turn) return; snapshots.forget(chatId); delete sessionMap[chatId]; chats.delete(chatId); persist(); }
 
   return { compactCommand, messageHelper, answerQuestion, goalState, goalControl, harnessDir, status, turnOf, runningTurns, attach, runTurn, goalCommand, planCommand, researchCommand, llmTarget, setPlanBriefing, resetSession, reopenPlan, skipStep, planGoal, planControl, planState, steerMessage, queueMessage, cancelQueued, takeQueue, forget, approve, setMode, stop, pendingFor, pendingAll, close, sessionOf: chatId => sessionMap[chatId]?.sessionId ?? null, workingFolder: chatId => sessionMap[chatId]?.cwd ?? null, isRunning: chatId => !!chats.get(chatId)?.turn, _debug: () => ({ rt, sessionMap }) };
 }
