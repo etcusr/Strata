@@ -45,6 +45,7 @@ export function parseArguments(raw) {
  * explanation. Unknown tools (a connected MCP server's) fall back to a generic sentence with their arguments.
  */
 const WORDS = {
+  tool_catalog: a => ['Finds the tools needed for this task.', Array.isArray(a.groups) ? a.groups.join(', ') : Array.isArray(a.names) ? a.names.join(', ') : ''],
   read: a => ['Reads a file.', a.file_path ?? a.path],
   glob: a => ['Looks for files by name.', a.pattern],
   grep: a => ['Searches inside files.', a.pattern ?? a.query],
@@ -70,6 +71,7 @@ const WORDS = {
  * these fixed sentences and writes the target (a file path, the command) beside them, so a row never shows `pwsh · Ran`.
  */
 const VERBS = {
+  tool_catalog: ['Finding tools', 'Found tools', "Couldn't find tools"],
   write: ['Writing a file', 'Wrote a file', "Couldn't write the file"],
   edit: ['Changing a file', 'Changed a file', "Couldn't change the file"],
   read: ['Reading a file', 'Read a file', "Couldn't read the file"],
@@ -129,6 +131,9 @@ export function toolVerb(name, state) {
 }
 /** The ToolCall fields the card needs, from one Harness tool call. */
 export function presentTool({ callId, name, args, reason = null }) {
+  if (name === 'tool_dispatch' && typeof args?.name === 'string' && args.name !== 'tool_dispatch') {
+    return presentTool({ callId, name: args.name, args: args.arguments && typeof args.arguments === 'object' ? args.arguments : {}, reason });
+  }
   const scope = toolScope(name);
   const words = WORDS[name]?.(args);
   const preview = scope === 'shell' && !words ? args.command ?? ''
@@ -341,7 +346,7 @@ export class TurnProjector {
         this.composing.delete(d.callId);
         if (draft && draft.bytes > 0 && !NO_CARD.has(d.name)) out.push(draft.frame({ done: true }));
         this.running.push(d.callId);
-        this.#status(toolUpdate('tool', 'tool', d.name, args, {}, { args: { tool: d.name, verb: card.verb, target: card.target } }));
+        this.#status(toolUpdate('tool', 'tool', card.name, card.args, {}, { args: { tool: card.name, verb: card.verb, target: card.target } }));
         out.push({ type: 'agent-tool', tool: card });
         break;
       }

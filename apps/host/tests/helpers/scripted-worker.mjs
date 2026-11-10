@@ -194,8 +194,8 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
     if (directive?.[1] === 'weather' || directive?.[1] === 'weatherold') {
       const step = toolMessages.length;
       if (directive[1] === 'weather' && step === 0) return toolCall('tool_catalog', { groups: ['web'] });
-      if (step === (directive[1] === 'weather' ? 1 : 0)) return toolCall('web_search', { queries: ['current weather Moscow'] });
-      if (step === (directive[1] === 'weather' ? 2 : 1)) return toolCall('web_fetch', { url: 'http://127.0.0.1:9/weather' });
+      if (step === (directive[1] === 'weather' ? 1 : 0)) return toolCall(directive[1] === 'weather' ? 'tool_dispatch' : 'web_search', directive[1] === 'weather' ? { name: 'web_search', arguments: { queries: ['current weather Moscow'] } } : { queries: ['current weather Moscow'] });
+      if (step === (directive[1] === 'weather' ? 2 : 1)) return toolCall(directive[1] === 'weather' ? 'tool_dispatch' : 'web_fetch', directive[1] === 'weather' ? { name: 'web_fetch', arguments: { url: 'http://127.0.0.1:9/weather' } } : { url: 'http://127.0.0.1:9/weather' });
       return say(['The weather source could not be reached.']);
     }
     if (directive?.[1] === 'planslow') return say(['## Slow plan\n\n', '1. First thing SCRIPT:goalstep\n', '2. A step that never finishes SCRIPT:slow 4000\n', '3. Third thing SCRIPT:goalstep\n']);

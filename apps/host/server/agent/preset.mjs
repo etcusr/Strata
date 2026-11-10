@@ -61,7 +61,7 @@ export const OS_LINES = {
 /** AGENT_PROMPT with the sentence for `platform` after its first line. */
 export function agentPromptFor(platform = process.platform, onDemand = false) {
   const line = OS_LINES[platform];
-  const prompt = onDemand ? `${AGENT_PROMPT}\n\nTools start in a compact catalog. Call tool_catalog to load only the groups needed for the task. After it returns, use the newly available tools. A simple reply needs no tool call.` : AGENT_PROMPT;
+  const prompt = onDemand ? `${AGENT_PROMPT}\n\nTools use a compact catalog. Call tool_catalog for the groups needed, then use tool_dispatch with the returned name and arguments. A simple reply needs no tool call.` : AGENT_PROMPT;
   if (!line) return prompt;
   const [first, ...rest] = prompt.split('\n\n');
   return [first, line, ...rest].join('\n\n');

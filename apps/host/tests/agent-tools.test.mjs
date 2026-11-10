@@ -118,7 +118,7 @@ test('on-demand categories separate browser backends and hide unrequested schema
   assert.equal(category('mcp__browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
-  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'job_list']);
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'job_list']);
 });
 
 test('large JSON web results are condensed before the model sees them', async () => {
@@ -166,13 +166,13 @@ test('tool failures are said in plain words with the original text kept after th
 
 // ------------------------------------------------------------------------------------------------- real Harness
 
-async function rig(t, { onDemand = false, mcpServers = {}, searchMock = null } = {}) {
+async function rig(t, { onDemand = false, mcpServers = {}, searchMock = null, webWithoutAsking = true } = {}) {
   const worker = await startScriptedWorker(onDemand ? { charsPerToken: 4 } : {});
   const dir = mkdtempSync(join(tmpdir(), 'strata-tools-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
   const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, slots: 4, mcpServers }];
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [],
-    ...(onDemand ? { tools: () => ({ onDemand: true, off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: true, browserEnabled: false, servers: {}, hasInstructionTools: false, hasCommandTools: false }) } : {}),
+    ...(onDemand ? { tools: () => ({ onDemand: true, off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking, browserEnabled: false, servers: {}, hasInstructionTools: false, hasCommandTools: false }) } : {}),
     env: process.env, startTimeoutMs: 90_000, searchMock });
   t.after(async () => { await bridge.close(); await worker.close(); cleanup(dir); });
   const run = async (chatId, message, { mode = 'bypass', answer } = {}) => {
@@ -192,44 +192,65 @@ async function rig(t, { onDemand = false, mcpServers = {}, searchMock = null } =
 const cards = frames => frames.filter(f => f.type === 'agent-tool').map(f => f.tool);
 const last = frames => cards(frames).at(-1);
 
-test('on-demand tools load for one turn and leave a later greeting small', { skip }, async (t) => {
+test('on-demand tool schemas stay stable after catalog and on a later greeting', { skip }, async (t) => {
   const r = await rig(t, { onDemand: true });
   const frames = await r.run('catalog', 'SCRIPT:call tool_catalog {"groups":["files","shell"]}');
   assert.match(last(frames).result, /BatchMode=yes/);
   const first = r.worker.requests.at(-2), loaded = r.worker.requests.at(-1);
-  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog']);
-  assert.ok(loaded.toolNames.includes('read') && loaded.toolNames.includes('bash'));
-  assert.ok(!loaded.toolNames.includes('web_search') && !loaded.toolNames.includes('subagent'));
+  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.deepEqual(loaded.toolNames, first.toolNames, 'catalog does not invalidate the cached prompt prefix');
+  assert.deepEqual(JSON.parse(first.raw).tools, JSON.parse(loaded.raw).tools, 'complete schemas stay byte-identical after catalog');
+  assert.match(last(frames).result, /"name":"read"/);
+  assert.match(last(frames).result, /"name":"bash"/);
   await r.run('catalog', 'SCRIPT:hello');
   const greeting = r.worker.requests.at(-1);
-  assert.deepEqual(greeting.toolNames, ['job_list', 'tool_catalog']);
-  assert.ok(greeting.promptChars < 7000, 'a short reply does not carry the full tool catalog');
+  assert.deepEqual(greeting.toolNames, first.toolNames);
   const fresh = await r.run('fresh-hello', 'SCRIPT:hello');
+  assert.ok(r.worker.requests.at(-1).promptChars < 7000, 'a fresh short reply does not carry the full tool catalog');
   const shown = fresh.filter(f => f.type === 'context').at(-1)?.contextTokens;
   assert.ok(shown > 0 && shown < 2000, `the context meter reads the compact request (${shown})`);
 });
 
-test('on-demand tools keep the group actually used by the previous turn', { skip }, async (t) => {
+test('on-demand tools can be dispatched on a later turn without changing request schemas', { skip }, async (t) => {
   const r = await rig(t, { onDemand: true });
   await r.run('jobs-resume', 'SCRIPT:call job_list {}');
   const first = r.worker.requests.at(-2);
-  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog']);
-  const saved = JSON.parse(readFileSync(join(r.dir, 'agent', 'tool-groups.json'), 'utf8'));
-  assert.ok(Object.values(saved.sessions).some(row => row.groups.includes('jobs')));
-  await r.run('jobs-resume', 'SCRIPT:hello');
+  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  const frames = await r.call('jobs-resume', 'tool_dispatch', { name: 'job_list', arguments: {} });
+  assert.match(last(frames).result, /job_list/);
   const resumed = r.worker.requests.at(-1);
-  assert.ok(resumed.toolNames.includes('job_output') && resumed.toolNames.includes('job_kill'));
-  assert.ok(!resumed.toolNames.includes('bash') && !resumed.toolNames.includes('web_search'));
+  assert.deepEqual(resumed.toolNames, first.toolNames);
+});
+
+test('on-demand dispatch keeps the named tool permission check', { skip }, async (t) => {
+  const r = await rig(t, { onDemand: true });
+  const file = join(r.ws, 'dispatch-denied.txt');
+  const frames = await r.call('dispatch-gate', 'tool_dispatch', {
+    name: 'write', arguments: { file_path: fwd(file), content: 'should not be written' },
+  }, { mode: 'manual', answer: 'deny' });
+  assert.ok(cards(frames).some(card => card.state === 'proposed'), 'the inner write still asks in Manual mode');
+  assert.ok(cards(frames).some(card => card.name === 'write'), 'the card names the actual tool');
+  assert.equal(existsSync(file), false, 'denying the inner tool prevents the change');
+});
+
+test('on-demand web dispatch asks on the outer card and shows the web tool', { skip }, async (t) => {
+  const r = await rig(t, { onDemand: true, searchMock: 'offline', webWithoutAsking: false });
+  const frames = await r.call('dispatch-web-gate', 'tool_dispatch', {
+    name: 'web_search', arguments: { queries: ['weather Moscow'] },
+  }, { mode: 'manual', answer: 'deny' });
+  assert.ok(cards(frames).some(card => card.state === 'proposed' && card.name === 'web_search'));
+  assert.ok(cards(frames).some(card => card.state === 'denied'));
 });
 
 test('on-demand connected tools stay hidden until the model requests them', { skip }, async (t) => {
   const mcpServers = { demo: { command: process.execPath, args: [fwd(join(import.meta.dirname, 'helpers', 'mini-mcp.mjs'))] } };
   const r = await rig(t, { onDemand: true, mcpServers });
   await r.run('mcp-catalog', 'SCRIPT:call tool_catalog {"groups":["connected"]}');
-  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['job_list', 'tool_catalog']);
+  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
   const loaded = r.worker.requests.at(-1).toolNames;
-  assert.ok(loaded.includes('mcp__demo__shout'));
-  assert.ok(!loaded.includes('bash') && !loaded.includes('web_search'));
+  assert.deepEqual(loaded, r.worker.requests.at(-2).toolNames);
+  const result = await r.call('mcp-catalog', 'tool_dispatch', { name: 'mcp__demo__shout', arguments: { text: 'hello' } }, { mode: 'bypass' });
+  assert.match(last(result).result, /HELLO/);
 });
 
 test('a short web task sends small requests even after loading web tools', { skip }, async (t) => {
@@ -237,8 +258,8 @@ test('a short web task sends small requests even after loading web tools', { ski
   await r.run('weather', 'SCRIPT:weather');
   const requests = r.worker.requests;
   assert.equal(requests.length, 4, 'catalog, search, fetch, answer');
-  assert.deepEqual(requests[0].toolNames, ['job_list', 'tool_catalog']);
-  assert.ok(requests.slice(1).every(q => q.toolNames.includes('web_search') && q.toolNames.includes('web_fetch')));
+  assert.deepEqual(requests[0].toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.ok(requests.slice(1).every(q => JSON.stringify(q.toolNames) === JSON.stringify(requests[0].toolNames)));
   assert.ok(requests.every(q => q.promptChars < 8000), 'the whole built-in tool inventory is never sent');
   assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 28_000, 'the extra catalog step still costs less than one old full-tool request');
 });

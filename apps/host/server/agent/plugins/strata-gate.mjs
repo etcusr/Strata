@@ -40,11 +40,17 @@ const BROWSER_LOOKING = new Set(['browser_snapshot', 'browser_take_screenshot', 
 export const READ_ONLY_TOOLS = new Set([
   'read', 'glob', 'grep', 'read_image', 'working_directory', 'todo_write', 'skill', 'present', 'lsp',
   'get_goal', 'create_goal', 'update_goal', 'list_agents', 'list_subagent_models', 'job_list', 'job_output',
-  'ask_user_question', 'exit_plan_mode', 'tool_catalog',
+  'ask_user_question', 'exit_plan_mode', 'tool_catalog', 'tool_dispatch',
   // (web_search and web_fetch are not here: the first use in a chat asks, see webDecision.)
   // Delegation: the child it starts is governed by this same gate.
   'subagent', 'subagent_fork', 'send_message', 'interrupt_agent', 'workflow',
 ]);
+
+// A dispatcher can execute its child only after the outer, model-visible call
+// passed this gate. The opaque token cannot be supplied by a model request.
+const approvedDispatches = new Map();
+export function markApprovedDispatch(token, name) { approvedDispatches.set(token, name); }
+export function clearApprovedDispatch(token) { approvedDispatches.delete(token); }
 
 const SHELL_TOOLS = new Set(['pwsh', 'bash']);
 
@@ -419,6 +425,9 @@ export function apply(ctx, config = {}) {
   ctx.on('tools/pre-execute', async (exec, next) => {
     const agent = exec.agent;
     if (!agent || exec.name === 'run_code') return next();
+    if (exec.parent && approvedDispatches.get(exec.parent) === exec.name) return next();
+    const requested = exec.name === 'tool_dispatch' && typeof exec.arguments?.name === 'string'
+      ? { ...exec, name: exec.arguments.name, arguments: exec.arguments.arguments } : exec;
     // Fail closed (T4): a session whose preset cannot be read (a reset in progress, a helper whose chat is gone) is treated as Manual, so
     // anything this file cannot prove is read-only still asks. It used to run unasked.
     let preset;
@@ -431,9 +440,9 @@ export function apply(ctx, config = {}) {
     if (preset !== MANUAL_PRESET && agent.session.header?.origin === 'subagent' && ctx.approval.overrideOf(agent.session) === 'ask') {
       agent.session.append('approval/policy', { policy: 'never' });
     }
-    if (preset === PLAN_PRESET) return planDecision(exec) ?? next();
+    if (preset === PLAN_PRESET) return planDecision(requested) ?? next();
     if (preset !== MANUAL_PRESET) return next();
-    const gate = manualDecision(exec, { provider: web.provider });
+    const gate = manualDecision(requested, { provider: web.provider });
     if (!gate) return next();
     if (gate.web) {
       // The person's switch, or a yes already given in this chat: no question.
@@ -442,7 +451,7 @@ export function apply(ctx, config = {}) {
       if (agent.session.header?.origin === 'subagent' && ctx.approval.overrideOf(agent.session) !== 'ask') {
         agent.session.append('approval/policy', { policy: 'ask' });
       }
-      return (await askWeb(exec, gate, agent)) ?? next();
+      return (await askWeb(requested, gate, agent)) ?? next();
     }
     // A child's approval policy is pinned to `never` by the Harness; asking is how its request reaches the person.
     if (agent.session.header?.origin === 'subagent' && ctx.approval.overrideOf(agent.session) !== 'ask') {

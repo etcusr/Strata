@@ -1,21 +1,19 @@
 /**
- * Keep tool schemas out of a request until the agent needs them.
+ * Keep the model-facing tool schemas stable across the whole conversation.
  *
  * The Harness still owns and executes every enabled tool (and its permission
- * checks). This plugin changes only which schemas the model sees. A small
- * catalog tool activates a group for the rest of the current turn.
+ * checks). The catalog returns schemas in a late tool result, and the model
+ * invokes them through one stable dispatcher. Changing the request's tool
+ * list would invalidate the engine's cached prompt prefix on a long chat.
  */
 export const name = 'strata-on-demand-tools';
 export const inject = ['tools', 'llm'];
 
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { clearApprovedDispatch, markApprovedDispatch } from './strata-gate.mjs';
 
-const groups = new Map();
-const used = new Map();
-const recent = new Map();
 const CATALOG = 'tool_catalog';
+const DISPATCH = 'tool_dispatch';
 const wrappedFetch = new WeakSet();
 export const CATEGORIES = ['files', 'shell', 'jobs', 'web', 'browser', 'devtools', 'skills', 'helpers', 'goals', 'questions', 'todo', 'present', 'connected'];
 
@@ -36,13 +34,11 @@ export function category(name) {
   return 'connected'; // A new enabled tool remains discoverable instead of silently disappearing.
 }
 
-export function visibleTools(sessionId, tools) {
+export function visibleTools(_sessionId, tools) {
   if (!Array.isArray(tools)) return tools;
-  const selected = groups.get(String(sessionId)) ?? new Set();
-  const hasMore = tools.some(tool => tool.name !== CATALOG);
-  // A resumed task may need to inspect a background job before it has a chance to load a group. This one
-  // small read-only schema also lets it recover when the Harness was restarted and the in-memory selection is gone.
-  return tools.filter(tool => (tool.name === CATALOG && hasMore) || tool.name === 'job_list' || selected.has('all') || selected.has(category(tool.name)));
+  // Stable on every step: activating a category must not rewrite the first
+  // tokens of a prompt whose KV cache is already warm.
+  return tools.filter(tool => tool.name === CATALOG || tool.name === DISPATCH || tool.name === 'job_list');
 }
 
 export function filteredHeader(sessionId, header) {
@@ -69,28 +65,7 @@ export function compactJsonBody(body, maxChars = 7800) {
   return `Structured JSON condensed: the response is too large to show in full. Top-level fields: ${Object.keys(value ?? {}).slice(0, 30).join(', ')}.\n${JSON.stringify(shrink(value, 1, 4, 50)).slice(0, maxChars - 200)}`;
 }
 
-export function apply(ctx, config = {}) {
-  const stateFile = typeof config.stateFile === 'string' ? config.stateFile : null;
-  if (stateFile) {
-    try {
-      const saved = JSON.parse(readFileSync(stateFile, 'utf8'));
-      const cutoff = Date.now() - 30 * 86400_000;
-      for (const [id, row] of Object.entries(saved.sessions ?? {})) {
-        if (row.at >= cutoff && Array.isArray(row.groups)) recent.set(id, new Set(row.groups.filter(group => CATEGORIES.includes(group))));
-      }
-    } catch { /* A missing or damaged cache only costs the next tool_catalog call. */ }
-  }
-  const persist = () => {
-    if (!stateFile) return;
-    try {
-      const sessions = Object.fromEntries([...recent.entries()].slice(-1000).map(([id, selected]) =>
-        [id, { at: Date.now(), groups: [...selected] }]));
-      mkdirSync(dirname(stateFile), { recursive: true });
-      const temp = `${stateFile}.${randomUUID()}.tmp`;
-      writeFileSync(temp, JSON.stringify({ version: 1, sessions }), { mode: 0o600 });
-      renameSync(temp, stateFile);
-    } catch { /* Tool availability must not depend on a writable state file. */ }
-  };
+export function apply(ctx) {
   const wrapFetch = () => {
     let agents;
     try { agents = ctx.get('agents')?.list?.() ?? []; } catch { return; }
@@ -111,43 +86,70 @@ export function apply(ctx, config = {}) {
   wrapFetch();
   ctx.tools.register({
     name: CATALOG,
-    description: 'Load tools only when needed. Choose groups: files (read, edit, search files), shell (run commands), jobs, web (search or open pages), browser (Strata browser), devtools (connected Chrome DevTools), skills, helpers, goals, questions, todo, present, connected (other MCP servers), or all. Selected tools appear on your next step. For a simple reply, answer without calling this tool.',
-    parameters: { type: 'object', additionalProperties: false, required: ['groups'], properties: {
+    description: 'Find tools only when needed. Choose groups: files, shell, jobs, web, browser, devtools, skills, helpers, goals, questions, todo, present, connected, or all. If a group is large, call again with names to get full argument schemas. Then call tool_dispatch. A simple reply needs no tool call.',
+    parameters: { type: 'object', additionalProperties: false, properties: {
       groups: { type: 'array', minItems: 1, items: { type: 'string', enum: [...CATEGORIES, 'all'] } },
+      names: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string' }, description: 'Exact tool names whose full argument schemas are needed.' },
     } },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     execute(args, exec) {
-      const id = String(exec.agent.session.id);
       const chosen = Array.isArray(args?.groups) ? args.groups.filter(group => CATEGORIES.includes(group) || group === 'all') : [];
+      const available = ctx.tools.schemas(exec.agent).filter(tool => tool.name !== CATALOG && tool.name !== DISPATCH);
+      if (Array.isArray(args?.names) && args.names.length) {
+        const schemas = available.filter(tool => args.names.includes(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }));
+        if (!schemas.length) return 'No enabled tool with those names.';
+        const detail = `Call tool_dispatch with one of these tools: ${JSON.stringify(schemas)}`;
+        if (detail.length <= 7000) return detail;
+        if (schemas.length > 1) return 'Those schemas are too large together. Call tool_catalog with one name at a time.';
+        const tool = schemas[0];
+        const fields = Object.fromEntries(Object.entries(tool.parameters?.properties ?? {}).map(([key, value]) =>
+          [key, { type: value.type, description: value.description?.slice(0, 140), enum: value.enum, required: value.required }]));
+        return `Call tool_dispatch with ${tool.name}. Its required fields are ${JSON.stringify(tool.parameters?.required ?? [])}; argument fields: ${JSON.stringify(fields).slice(0, 6200)}.`;
+      }
       if (!chosen.length) return 'Choose a group from the tool_catalog description.';
-      const available = ctx.tools.schemas(exec.agent).filter(tool => tool.name !== CATALOG);
       const availableGroups = new Set(available.map(tool => category(tool.name)));
       const loaded = chosen.filter(group => group === 'all' ? available.length > 0 : availableGroups.has(group));
       if (!loaded.length) return `No enabled tools in ${chosen.join(', ')}. Available groups: ${[...availableGroups].join(', ') || 'none'}.`;
-      const selected = groups.get(id) ?? new Set();
-      for (const group of loaded) selected.add(group);
-      groups.set(id, selected);
-      const names = available.filter(tool => loaded.includes('all') || loaded.includes(category(tool.name))).map(tool => tool.name);
+      const schemas = available.filter(tool => loaded.includes('all') || loaded.includes(category(tool.name)))
+        .map(({ name, description, parameters }) => ({ name, description, parameters }));
       const ssh = loaded.includes('shell') || loaded.includes('all')
         ? ' For SSH, use noninteractive authentication (BatchMode=yes), a short ConnectTimeout and one connection attempt. Give long remote commands a bounded timeout or run them as a background job. After Permission denied (publickey), stop retrying the same credentials and diagnose the key or agent once.'
         : '';
-      return `Loaded ${loaded.join(', ')} tools for this turn: ${names.join(', ')}. Continue the task using the newly available tools.${ssh}`;
+      const detailed = `Call tool_dispatch with the exact tool name and arguments from these schemas: ${JSON.stringify(schemas)}${ssh}`;
+      if (detailed.length <= 7000) return detailed;
+      const brief = schemas.map(({ name, description, parameters }) => ({ name, description: description?.slice(0, 130), required: parameters?.required, arguments: Object.keys(parameters?.properties ?? {}) }));
+      const summary = `Available tools: ${JSON.stringify(brief)}. Call tool_catalog with names to get the full schema before tool_dispatch.${ssh}`;
+      return summary.length <= 7000 ? summary : `Available tool names: ${schemas.map(tool => tool.name).join(', ')}. Call tool_catalog with names for the schema of the one you need.${ssh}`;
     },
   });
-  ctx.on('session/event', (session, event) => {
-    const id = String(session.id);
-    if (event.type === 'turn/start') {
-      groups.set(id, new Set(recent.get(id) ?? []));
-      used.set(id, new Set());
-    } else if (event.type === 'tool/call' && event.data?.name && event.data.name !== CATALOG) {
-      const group = category(event.data.name);
-      used.get(id)?.add(group);
-      groups.get(id)?.add(group);
-    } else if (event.type === 'turn/end') {
-      recent.set(id, used.get(id) ?? new Set());
-      used.delete(id);
-      persist();
-    }
+  ctx.tools.register({
+    name: DISPATCH,
+    description: 'Run one enabled tool by its exact name. Use tool_catalog first if you need its argument schema. The named tool still runs through its normal permissions and safety checks.',
+    parameters: { type: 'object', additionalProperties: false, required: ['name', 'arguments'], properties: {
+      name: { type: 'string' }, arguments: { type: 'object' },
+    } },
+    output: {
+      schema: { type: 'object', additionalProperties: true },
+      render: (_args, value) => [{ type: 'text', text: `${value.name}: ${value.isError ? 'failed' : 'finished'}` }, ...(value.content ?? [])],
+    },
+    async execute(args, exec) {
+      const name = args?.name;
+      if (typeof name !== 'string' || name === CATALOG || name === DISPATCH || !ctx.tools.get(name, exec.agent)) {
+        return { name: String(name), isError: true, content: [{ type: 'text', text: 'Tool is unavailable. Call tool_catalog to see enabled tools.' }] };
+      }
+      markApprovedDispatch(exec.token, name);
+      let result;
+      try {
+        result = await ctx.tools.execute({
+          callId: `${exec.callId}:dispatch:${randomUUID()}`, rootCallId: exec.rootCallId,
+          name, arguments: args.arguments, agent: exec.agent, parent: exec.token, signal: exec.signal,
+        });
+      } finally { clearApprovedDispatch(exec.token); }
+      if (result.isError) throw new Error(result.content.map(block => block.type === 'text' ? block.text : '').filter(Boolean).join('\n') || result.error?.message || `${name} failed`);
+      for (const context of result.additionalContexts ?? []) exec.deferContext(context);
+      if (result.concludesTurn) exec.concludeTurn();
+      return { name, isError: result.isError, content: result.content };
+    },
   });
   if (typeof ctx.llm.prepareCall === 'function') {
     const original = ctx.llm.prepareCall;
