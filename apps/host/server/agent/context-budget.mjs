@@ -98,8 +98,8 @@ function textBlocks(message) {
  * the middle is replaced by a line saying how much was left out. Only the copy sent to the summariser is cut; the conversation keeps
  * the whole message until the summary replaces it.
  */
-export function clipMessage(message, maxTokens, density = 1) {
-  if (estimateMessage(message) * density <= maxTokens) return message;
+export function clipMessage(message, maxTokens, density = 1, estimated = estimateMessage(message)) {
+  if (estimated * density <= maxTokens) return message;
   const blocks = textBlocks(message);
   if (!blocks.length) return message;
   const others = estimateMessage({ ...message, content: (message.content ?? []).filter(b => !blocks.includes(b)) }) * density;
@@ -116,41 +116,96 @@ export function clipMessage(message, maxTokens, density = 1) {
   return { ...message, content };
 }
 
-/** Whether cutting the list in front of index `i` would separate a tool call from its result. */
-function balancedBefore(messages, i) {
+/** Precompute the latest balanced boundary in one pass, preserving the old split choices. */
+function splitSized(sized, room, density, cost = sized.map(m => estimateMessage(m) * density)) {
+  const latest = [0];
   let open = 0;
-  for (let k = 0; k < i; k++) {
-    const m = messages[k];
-    if (m?.role === 'assistant') open += (Array.isArray(m.content) ? m.content : []).filter(b => b?.type === 'tool-call').length;
-    else if (m?.role === 'tool') open -= 1;
+  for (let i = 0; i < sized.length; i++) {
+    const m = sized[i];
+    if (m?.role === 'assistant') for (const b of m.content ?? []) if (b?.type === 'tool-call') open++;
+    if (m?.role === 'tool') open--;
+    latest.push(open <= 0 ? i + 1 : latest[i]);
   }
-  return open <= 0;
-}
-
-/**
- * Split messages into runs that each fit `budget` real tokens (price `density`), cutting between a tool call's result and the next
- * message when it can. A message bigger than the budget by itself is clipped first. Order is kept.
- */
-export function splitMessages(messages, budget, density = 1) {
-  const room = Math.max(512, budget);
-  const sized = messages.map(m => clipMessage(m, Math.floor(room * 0.8), density));
-  const cost = sized.map(m => estimateMessage(m) * density);
   const runs = [];
   let start = 0, used = 0;
   for (let i = 0; i < sized.length; i++) {
     if (i > start && used + cost[i] > room) {
-      // Cut as late as possible, but never between a tool call and its result when a clean place exists inside the run.
-      let cut = i;
-      while (cut > start + 1 && !balancedBefore(sized, cut)) cut--;
-      if (!balancedBefore(sized, cut)) cut = i;
+      const cut = latest[i] > start ? latest[i] : i;
       runs.push(sized.slice(start, cut));
       start = cut;
-      used = cost.slice(start, i).reduce((n, x) => n + x, 0);
+      // A carried suffix is visited at most once more: the next cut either passes it or falls at i.
+      // Sum in the old order (no prefix subtraction) to preserve floating-point boundary decisions.
+      used = 0;
+      for (let k = start; k < i; k++) used += cost[k];
     }
     used += cost[i];
   }
   if (start < sized.length) runs.push(sized.slice(start));
   return runs;
+}
+
+/** Legacy clipping remains the default; the linear splitter preserves its request boundaries. */
+export function splitMessages(messages, budget, density = 1, { preserveOversizedMessages = false } = {}) {
+  const room = Math.max(512, budget);
+  if (preserveOversizedMessages) return splitSized(losslessMessages(messages, room, density), room, density);
+  const cost = [];
+  const sized = messages.map(m => {
+    const estimated = estimateMessage(m);
+    const clipped = clipMessage(m, Math.floor(room * 0.8), density, estimated);
+    cost.push((clipped === m ? estimated : estimateMessage(clipped)) * density);
+    return clipped;
+  });
+  // Estimates live only within this synchronous split: mutations and route/template changes cannot reuse stale prices.
+  return splitSized(sized, room, density, cost);
+}
+
+/**
+ * Oversized exchanges become quoted transcript fragments, never executable partial tool calls.
+ * Only these exchanges change representation. Source indices are relative to this compaction body.
+ * Every character of every text block is sent, in order; atomic non-text blocks fail closed if too big.
+ */
+function losslessMessages(messages, room, density) {
+  const out = [];
+  let start = 0, open = 0, cost = 0;
+  function flush(end) {
+    const group = messages.slice(start, end);
+    if (cost <= room) out.push(...group);
+    else for (let i = start; i < end; i++) {
+      const m = messages[i];
+      for (let b = 0; b < (m.content ?? []).length; b++) {
+        const block = m.content[b];
+        const source = JSON.stringify({ message: i, id: m.id, seq: m.seq, role: m.role, toolCallId: m.toolCallId, block: b, type: block.type });
+        const quote = (text, offset) => ({ role: 'user', content: [{ type: 'text', text: `[Quoted conversation fragment ${source}; offset=${offset}]\n${text}` }] });
+        if (block.type !== 'text' && block.type !== 'reasoning') {
+          const quoted = quote(JSON.stringify(block), 0);
+          if (estimateMessage(quoted) * density > room) throw Object.assign(new Error('An indivisible summary block exceeds the context budget; history was not replaced.'), { code: 'COMPACTION_BLOCK_TOO_LARGE' });
+          out.push(quoted);
+          continue;
+        }
+        const text = String(block.text ?? '');
+        // Reserve framing for the longest offset; avoid breaking UTF-16 surrogate pairs.
+        const size = Math.floor((room / density - estimateMessage(quote('', text.length)) - 2) * CHARS_PER_TOKEN);
+        if (size < 2) throw new Error('No room for a summary fragment; history was not replaced.');
+        for (let offset = 0; offset < text.length || (offset === 0 && !text.length);) {
+          let end = Math.min(text.length, offset + size);
+          if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1])) end--;
+          out.push(quote(text.slice(offset, end), offset));
+          if (end === text.length) break;
+          offset = end;
+        }
+      }
+    }
+    start = end; cost = 0;
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    cost += estimateMessage(m) * density;
+    if (m?.role === 'assistant') for (const b of m.content ?? []) if (b?.type === 'tool-call') open++;
+    if (m?.role === 'tool') open--;
+    if (open <= 0) flush(i + 1);
+  }
+  if (start < messages.length) flush(messages.length);
+  return out;
 }
 
 /** Whether a failure is the model server saying the prompt does not fit its window. */
@@ -164,11 +219,13 @@ export function isContextOverflow(error) {
 /** The Harness asks for "concise English engineering prose", so a Chinese or Russian chat came back summarised in English (#4750). One sentence is added to the
  *  summary request's last message: write it in the language the person used. Paths, commands and identifiers stay exact. Messages are not changed in place. */
 export const SUMMARY_LANGUAGE_RULE = 'Write the summary in the language the person used in this conversation (English only when they wrote English). The instruction above is in English; that does not change the language of the summary. Keep file paths, commands, error strings, identifiers and numbers exactly as they appear.';
-export function withSummaryLanguage(messages) {
+export const SUMMARY_CHECKPOINT_RULE = 'Use a concise structured checkpoint in the conversation language: user objective and constraints; decisions and their reasons; verified facts with evidence; failed attempts and unresolved errors; unfinished work and next actions. Preserve exact numbers, paths, commands and identifiers. Distinguish direct user instructions, tool observations and model inferences. Carry every still-active constraint forward; explicitly mark a requirement superseded only when the source says so. Keep supplied source-message IDs and archive locators for important claims; never invent citations. Remove repeated prose and routine successful logs before removing facts. Omit empty sections.';
+export function withSummaryLanguage(messages, { structured = false } = {}) {
   if (!Array.isArray(messages) || !messages.length) return messages;
   const last = messages[messages.length - 1];
   if (!last || last.role !== 'user') return messages;
-  const content = typeof last.content === 'string' ? last.content + ' ' + SUMMARY_LANGUAGE_RULE
-    : Array.isArray(last.content) ? [...last.content, { type: 'text', text: SUMMARY_LANGUAGE_RULE }] : null;
+  const rule = structured ? `${SUMMARY_LANGUAGE_RULE} ${SUMMARY_CHECKPOINT_RULE}` : SUMMARY_LANGUAGE_RULE;
+  const content = typeof last.content === 'string' ? last.content + ' ' + rule
+    : Array.isArray(last.content) ? [...last.content, { type: 'text', text: rule }] : null;
   return content === null ? messages : [...messages.slice(0, -1), { ...last, content }];
 }

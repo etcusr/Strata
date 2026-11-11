@@ -40,7 +40,7 @@ import { createHash } from 'node:crypto';
 
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
-export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false, slotSave = null } = {}) {
+export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model = 'scripted-model', serial = false, window = 0, charsPerToken = 0, noCount = false, slotSave = null, summaryReply = null } = {}) {
   // `window` + `charsPerToken` make it behave like the engine: every request's prompt is counted (its size over charsPerToken), the usage it
   // reports is that count, and a prompt that leaves no room to answer is refused with the engine's own 400 ("requests are never truncated").
   // `serial` stands in for an engine with one request slot: the next request waits until the one before it has finished.
@@ -129,6 +129,17 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
     };
 
     // A model that read "[sandbox: escalation available ...]" retries the exact call once with the narrowest wider mode.
+    // The Harness's compaction request (its summarizer prompt asks for the person's evolving goals): answer with a short summary.
+    if (messages.some(m => /evolving goals/.test(text(m)))) {
+      requests.at(-1).summary = true;
+      if (summaryReply) {
+        const reply = summaryReply(body, requests.filter(r => r.summary).length);
+        send({ role: 'assistant', content: reply.text });
+        return finish(reply.finish ?? 'stop', reply.tokens ?? 10);
+      }
+      return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']);
+    }
+
     // Only this prompt's own tool results count: a chat that has run tools before carries older ones.
     const promptAt = messages.findLastIndex(m => m.role === 'user' && /SCRIPT:/.test(text(m)));
     const toolMessages = messages.slice(promptAt + 1).filter(m => m.role === 'tool');
@@ -217,8 +228,6 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       return say(['Tool finished. ', `Result: ${result}`]);
     }
     const [name, args] = [directive?.[1], (directive?.[2] ?? '').trim()];
-    // The Harness's compaction request (its summarizer prompt asks for the person's evolving goals): answer with a short summary.
-    if (messages.some(m => /evolving goals/.test(text(m)))) { requests.at(-1).summary = true; return say(['Summary of the earlier conversation: the person asked for echoes of a word and got them.']); }
     // The Harness's session-title request carries the same user text but offers no tools.
     if (!(body.tools ?? []).length && messages.some(m => /concise title/i.test(text(m)))) return say(['Scripted title']);
     if (name === 'slow') {

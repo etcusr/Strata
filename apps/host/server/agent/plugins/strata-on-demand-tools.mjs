@@ -65,8 +65,9 @@ export function compactJsonBody(body, maxChars = 7800) {
   return `Structured JSON condensed: the response is too large to show in full. Top-level fields: ${Object.keys(value ?? {}).slice(0, 30).join(', ')}.\n${JSON.stringify(shrink(value, 1, 4, 50)).slice(0, maxChars - 200)}`;
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
   const wrapFetch = () => {
+    if (config.archiveToolResults) return;
     let agents;
     try { agents = ctx.get('agents')?.list?.() ?? []; } catch { return; }
     for (const agent of agents) {

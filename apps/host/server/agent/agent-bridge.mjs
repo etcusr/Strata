@@ -1,3 +1,5 @@
+import { isContextOverflow } from './context-budget.mjs';
+import { shouldCompactStoppedTurn } from './stopped-compaction.mjs';
 /**
  * The agent bridge: Strata chats as Harness sessions.
  *
@@ -22,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import { GatewayClient } from './gateway-client.mjs';
 import { HarnessProcess, resolveHarness, redact, stopStaleAgent } from './harness-runtime.mjs';
 import { StatusReporter } from './status.mjs';
-import { buildProfile, routeFor, MODE_PRESETS, modeOf, effortOf, localOutputBudget, localCompactionHeadroom, LOCAL_COMPACTION_FRACTION } from './profile.mjs';
+import { buildProfile, contextPolicyFromFile, routeFor, MODE_PRESETS, modeOf, effortOf, localContextBudgets } from './profile.mjs';
 import { TurnProjector, parseArguments as parseArgs } from './events.mjs';
 import { ChildProjector } from './children.mjs';
 import { nearestBudget } from './llm-shape.mjs';
@@ -185,7 +187,7 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
   /** The agent's profile now, plus where its shaped routes really lead (read by the forwarding endpoint). */
   let shapeTargets = {};
   function buildProfileNow() {
-    const profile = buildProfile({ local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
+    const profile = buildProfile({ archiveRoot: join(root, 'tool-results'), contextPolicy: contextPolicyFromFile(join(root, 'context-policy.json'), env), local: localInstances(), connections: connections(), gate, tools: tools(), skillsDir: skillsDir(), proxyBase, searchMock, defaultLocalId: defaultLocalId() });
     shapeTargets = profile.shapeTargets ?? {};
     return profile;
   }
@@ -591,7 +593,7 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       if (!failure && !noteReason && !cutEnd && !turn.stopping && !turn.forgetOnEnd && route.kind === 'local' && activeTurns() === 0)
         void snapshots.save(chatId, sessionId, route, projector.contextTokens);
       // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
-      if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId);
+      if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId, { route, reason: noteReason, error: projector.ended?.error, forgotten: turn.forgetOnEnd });
       if (turn.forgetOnEnd) forget(chatId);
     }
 
@@ -1443,8 +1445,7 @@ ${note.text}
     const window = Math.min(now?.window || route.contextWindow, route.contextWindow);
     const pressure = now?.tokens ?? 0;
     // Where the Harness starts summarising by itself on this window (profile.mjs: the reply keeps its room, then the headroom).
-    const reply = localOutputBudget(window);
-    const threshold = Math.floor(Math.min(window * LOCAL_COMPACTION_FRACTION, window - reply - localCompactionHeadroom(window)));
+    const { threshold } = localContextBudgets(window, contextPolicyFromFile(join(root, 'context-policy.json'), env));
     let verdict = decideFit({ window, pressure, messageTokens: tokens, threshold });
     // The earlier conversation carried into a fresh session is what pushed it over: send the message alone instead.
     if (verdict.action === 'too-large' && carried !== message) {
@@ -1508,8 +1509,18 @@ ${note.text}
   }
 
   /** Summarise the older part of a session with the Harness's own /compact. Best effort: the next message compacts again by itself when it must. */
-  async function compactSession(runtime, sessionId) {
+  async function compactSession(runtime, sessionId, { route, reason, error, forgotten } = {}) {
     try {
+      if (forgotten) return;
+      const policy = contextPolicyFromFile(join(root, 'context-policy.json'), env);
+      if (policy.skipLowPressureCompaction && !isContextOverflow(error)) {
+        const now = await contextOf(runtime, sessionId);
+        const threshold = route?.kind === 'local' && now?.window > 0 ? localContextBudgets(now.window, policy).threshold : null;
+        if (!shouldCompactStoppedTurn({ reason, tokens: now?.tokens, threshold })) {
+          log('agent · skipped compaction after a stopped turn: insufficient context pressure');
+          return;
+        }
+      }
       const r = await runtime.gw.rpc('commands/execute', { agentId: sessionId, line: '/compact', submittedAttachments: [] });
       log(`agent · compact after a stopped turn: ${r?.result?.kind ?? 'done'} ${String(r?.result?.text ?? '').slice(0, 120)}`);
     } catch (e) { log(`agent · compact after a stopped turn failed: ${e.message}`); }

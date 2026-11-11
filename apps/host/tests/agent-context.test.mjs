@@ -94,8 +94,8 @@ test('a summary request is split into pieces that fit, each message whole when i
 });
 
 /** The scripted model server counting like the engine (3 characters a token here: logs and code) in a 32K window. */
-async function rig(t, { window = 32768, charsPerToken = 3, noCount = false } = {}) {
-  const worker = await startScriptedWorker({ window, charsPerToken, noCount });
+async function rig(t, { window = 32768, charsPerToken = 3, noCount = false, summaryReply = null } = {}) {
+  const worker = await startScriptedWorker({ window, charsPerToken, noCount, summaryReply });
   const dir = mkdtempSync(join(tmpdir(), 'strata-ctx-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => [{ id: 'i', label: 'S', baseUrl: worker.url, modelId: 'scripted-model', context: window, slots: 2 }], connections: () => [], env: process.env, startTimeoutMs: 90_000 });
@@ -305,4 +305,23 @@ test('the summary request asks for the language of the conversation and leaves t
   assert.match(withSummaryLanguage([{ role: 'user', content: 'x' }])[0].content, /language the person used/);
   assert.deepEqual(withSummaryLanguage([{ role: 'assistant', content: 'x' }]), [{ role: 'assistant', content: 'x' }]);
   assert.deepEqual(withSummaryLanguage([]), []);
+});
+
+
+test('a persistently truncated summary leaves the real Harness conversation intact', { skip }, async t => {
+  const { worker, bridge, ws, send } = await rig(t, {
+    summaryReply: () => ({ text: 'TRUNCATED_CHECKPOINT', finish: 'length' }),
+  });
+  const fact = 'Уникальное требование: /tmp/данные; лимит 7319; git status';
+  for (let i = 0; i < 3; i++) await send(`SCRIPT:echo round${i} ${fact} ${dense.repeat(700)}`);
+  const before = worker.requests.filter(r => !r.summary).at(-1);
+  const frames = [];
+  await bridge.compactCommand({ chatId: 'c', message: '/compact', workspacePath: ws, mode: 'bypass', choice: null, onFrame: f => frames.push(f) });
+  assert.ok(frames.some(f => f.key === FIT_TEXT.compactFailed), JSON.stringify(frames));
+  assert.ok(worker.requests.some(r => r.summary));
+  await send('SCRIPT:echo after-failed-compaction');
+  const after = worker.requests.filter(r => !r.summary).at(-1);
+  assert.ok(after.raw.includes(fact));
+  assert.ok(after.messageCount >= before.messageCount);
+  assert.ok(!after.raw.includes('TRUNCATED_CHECKPOINT'));
 });

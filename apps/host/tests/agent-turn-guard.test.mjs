@@ -3,7 +3,7 @@
 // run the real search code on a pretend web that refuses (no network).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TurnGuard, GUARD_LIMITS, GUARD_NOTES, guardNote } from '../server/agent/turn-guard.mjs';
@@ -96,6 +96,7 @@ async function rig(t, options = {}) {
   const worker = await startScriptedWorker({ chunkDelayMs: 5 });
   const dir = mkdtempSync(join(tmpdir(), 'strata-guard-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
+  if (options.policy) { mkdirSync(join(dir, 'agent')); writeFileSync(join(dir, 'agent', 'context-policy.json'), JSON.stringify(options.policy)); }
   const logs = [];
   const bridge = createAgentBridge({ dataDir: dir, localInstances: () => [{ id: 'i', label: 'S', baseUrl: worker.url, modelId: 'scripted-model', context: options.context ?? 32768, slots: 2 }], connections: () => [],
     // these chats are in Manual and search without a person at the card: the Settings switch that skips the web question is on
@@ -138,7 +139,7 @@ test('an ordinary turn whose searches keep failing ends with the plain sentence 
 });
 
 test('a context at 100% with no answer is never silent: the plain message comes, and the older messages are summarised', { skip }, async (t) => {
-  const r = await rig(t, { context: 32768 });
+  const r = await rig(t, { context: 32768, policy: { skipLowPressureCompaction: true } });
   const out = [];
   await r.bridge.runTurn({ ...r.base('f1', f => out.push(f)), message: 'SCRIPT:bloat 32000' });
   assert.equal(out.filter(f => f.type === 'error').length, 0);
@@ -151,4 +152,15 @@ test('a context at 100% with no answer is never silent: the plain message comes,
   const out2 = [];
   await r.bridge.runTurn({ ...r.base('f2', f => out2.push(f)), message: 'SCRIPT:bloat 3000' });
   assert.equal(out2.filter(f => f.type === 'delta' && f.key).at(-1)?.key, GUARD_NOTES.empty, 'no words at all, plenty of room: still a message');
+});
+
+for (const enabled of [false, true]) test(`low-pressure search guards avoid needless summaries when opted in (${enabled})`, { skip }, async t => {
+  const r = await rig(t, { policy: { skipLowPressureCompaction: enabled } });
+  await r.bridge.runTurn({ ...r.base('skip-compact', () => {}), message: 'SCRIPT:echo initial\n' + 'older verified evidence; '.repeat(500) });
+  await r.bridge.runTurn({ ...r.base('skip-compact', () => {}), message: 'SCRIPT:searchloop' });
+  for (let i = 0; i < 60 && !r.logs.some(l => /skipped compaction|compact after a stopped turn:/.test(l)); i++) await new Promise(resolve => setTimeout(resolve, 50));
+  if (enabled) {
+    assert.ok(r.logs.some(l => /skipped compaction/.test(l)));
+    assert.equal(r.worker.requests.filter(q => q.summary).length, 0);
+  } else assert.ok(r.worker.requests.some(q => q.summary), 'baseline should summarize an older turn: ' + r.logs.filter(l => /compact/.test(l)).join(' | '));
 });

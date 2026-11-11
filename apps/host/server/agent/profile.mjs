@@ -18,6 +18,7 @@
  * the profile file, a prompt, or a log.
  */
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { standardPreset } from './preset.mjs';
 import { GROUP_IDS } from './tools-catalog.mjs';
@@ -59,6 +60,7 @@ export const GATE_PLUGIN = fileURLToPath(new URL('./plugins/strata-gate.mjs', im
 /** The app's web search (DuckDuckGo, or the person's own Exa / Perplexity key), registered with the Harness's web seam. */
 /** Compaction that measures the real prompt and summarises in pieces that fit the window (plugins/strata-context.mjs). */
 export const CONTEXT_PLUGIN = fileURLToPath(new URL('./plugins/strata-context.mjs', import.meta.url));
+export const TOOL_ARCHIVE_PLUGIN = fileURLToPath(new URL('./plugins/strata-tool-archive.mjs', import.meta.url));
 export const ON_DEMAND_TOOLS_PLUGIN = fileURLToPath(new URL('./plugins/strata-on-demand-tools.mjs', import.meta.url));
 export const MODELS_PLUGIN = fileURLToPath(new URL('./plugins/strata-models.mjs', import.meta.url));
 export const SEARCH_PLUGIN = fileURLToPath(new URL('./plugins/strata-search.mjs', import.meta.url));
@@ -209,7 +211,44 @@ export function outputBudget(context, maxOutput = null) {
 /** What a local model, or an OpenAI-style server on this network, takes for the thinking level (see the comment where a local route is built). */
 const THINKING_COMPAT = { supportsStore: false, thinkingFormat: 'chat-template', chatTemplateKwargs: { enable_thinking: { $var: 'thinking.enabled' }, reasoning_effort: { $var: 'thinking.effort', omitWhenOff: true } } };
 
-export function buildProfile({ local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null }) {
+/** Optional context experiments; absent variables preserve the generated profile exactly. */
+export function contextPolicyFromEnv(env = process.env) {
+  const policy = {};
+  if (['0', '1'].includes(env.STRATA_CONTEXT_DIAGNOSTICS)) policy.diagnostics = env.STRATA_CONTEXT_DIAGNOSTICS === '1';
+  if (['0', '1'].includes(env.STRATA_CONTEXT_LOSSLESS)) policy.preserveOversizedMessages = env.STRATA_CONTEXT_LOSSLESS === '1';
+  if (/^[0-3]$/.test(env.STRATA_CONTEXT_SUMMARY_RETRIES ?? '')) policy.summaryRetries = Number(env.STRATA_CONTEXT_SUMMARY_RETRIES);
+  return policy;
+}
+
+/** Desktop launches need persistent opt-ins; read only this host's own policy file. */
+export function contextPolicyFromFile(file, env = process.env) {
+  let saved = {};
+  try { saved = JSON.parse(readFileSync(file, 'utf8')); }
+  catch (error) { if (error.code !== 'ENOENT') throw new Error('Cannot read agent/context-policy.json; check its JSON syntax.'); }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('Context policy must be an object.');
+  for (const [key, value] of Object.entries(saved)) {
+    const ranges = { archiveInlineChars: [2048, 32000], archiveKeepRecent: [2, 64], archiveMinPruneTokens: [512, 32768], replyReserveTokens: [512, 32768], summaryTokens: [1024, 16384], retainTokens: [1024, 65536] };
+    const valid = ranges[key] ? Number.isInteger(value) && value >= ranges[key][0] && value <= ranges[key][1]
+      : key === 'thresholdRatio' ? Number.isFinite(value) && value >= 0.5 && value <= 0.9
+      : key === 'summaryRetries' ? Number.isInteger(value) && value >= 0 && value <= 3
+      : ['diagnostics', 'preserveOversizedMessages', 'archiveToolResults', 'skipLowPressureCompaction', 'structuredSummaries'].includes(key) && typeof value === 'boolean';
+    if (!valid) throw new Error(`Invalid context policy field or value: ${key}.`);
+  }
+  return { ...saved, ...contextPolicyFromEnv(env) };
+}
+
+export function localContextBudgets(window, policy = {}) {
+  const reply = Math.min(policy.replyReserveTokens ?? localOutputBudget(window), localOutputBudget(window));
+  const headroom = localCompactionHeadroom(window);
+  const thresholdRatio = policy.thresholdRatio ?? LOCAL_COMPACTION_FRACTION;
+  return { reply, headroom, thresholdRatio, threshold: Math.floor(Math.min(window * thresholdRatio, window - reply - headroom)),
+    summary: Math.min(policy.summaryTokens ?? compactionOutputBudget(window), compactionOutputBudget(window)),
+    ...(policy.retainTokens ? { retainTokens: Math.min(policy.retainTokens, Math.floor(window * 0.25)) } : {}) };
+}
+
+export function buildProfile({ archiveRoot = null, contextPolicy = contextPolicyFromEnv(), local = [], connections = [], gate = true, tools = NO_TOOLS_SETTINGS, skillsDir = null, proxyBase = null, searchMock = null, defaultLocalId = null }) {
+  if (contextPolicy.archiveToolResults && !archiveRoot) throw new Error('Tool archives require a host-owned storage root');
+  const archive = contextPolicy.archiveToolResults ? { root: archiveRoot, inlineChars: contextPolicy.archiveInlineChars ?? 6000, keepRecent: contextPolicy.archiveKeepRecent ?? 8, minPruneTokens: contextPolicy.archiveMinPruneTokens ?? 4096 } : null;
   const providers = {};
   const env = {};
   const routes = [];
@@ -227,7 +266,13 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
       const key = `${route}~s${budget}`;
       providers[key] = { ...def, displayName: `${def.displayName} (with your response settings)`, baseURL: `${proxyBase}/${key}/v1`, ...(budget ? { headers: { ...(def.headers ?? {}), 'x-strata-budget': String(budget) } } : {}) };
       shapeTargets[key] = realBase;
-      for (const m of def.models) { const w = m.contextWindow, out = m.maxTokens; compaction.push({ provider: key, model: m.id, headroomTokens: compactionHeadroom(w, out) }); }
+      for (const m of def.models) {
+        const w = m.contextWindow, out = m.maxTokens;
+        const base = compaction.find(p => p.provider === route && p.model === m.id);
+        const tuned = ['thresholdRatio', 'replyReserveTokens', 'summaryTokens', 'retainTokens'].some(k => contextPolicy[k] !== undefined);
+        compaction.push(tuned && base ? { ...base, provider: key }
+          : { provider: key, model: m.id, headroomTokens: compactionHeadroom(w, out) });
+      }
       keys[budget] = key;
     }
     return keys;
@@ -240,6 +285,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // does not authenticate gets a fixed placeholder; one that does gets its real key, by reference.
     env[keyEnv] = inst.key || 'strata-local';
     const context = inst.context ?? 32768;
+    const budgets = localContextBudgets(context, contextPolicy);
     providers[route] = {
       displayName: inst.label ? `Strata (local) ${inst.label}` : 'Strata (local)',
       api: 'openai-completions',
@@ -252,12 +298,12 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
       // reasoning_effort; a top-level `enable_thinking` (pi-ai's `qwen` format) is ignored, so the model went on thinking with the menu on Off.
       compat: THINKING_COMPAT,
       models: [{
-        id: inst.modelId, name: inst.label || inst.modelId, contextWindow: context, maxTokens: localOutputBudget(context),
+        id: inst.modelId, name: inst.label || inst.modelId, contextWindow: context, maxTokens: budgets.reply,
         input: inst.vision ? ['text', 'image'] : ['text'],
         reasoning: true, reasoningEfforts: LOCAL_EFFORTS,
       }],
     };
-    compaction.push({ provider: route, model: inst.modelId, thresholdRatio: LOCAL_COMPACTION_FRACTION, headroomTokens: localCompactionHeadroom(context), maxTokens: compactionOutputBudget(context) });
+    compaction.push({ provider: route, model: inst.modelId, thresholdRatio: budgets.thresholdRatio, headroomTokens: budgets.headroom, maxTokens: budgets.summary, ...(budgets.retainTokens ? { retainTokens: budgets.retainTokens } : {}) });
     slots = Math.max(slots, Number.isFinite(inst.slots) && inst.slots >= 1 ? Math.floor(inst.slots) : 1);
     const shaped = addShaped(route, providers[route], inst.baseUrl);
     routes.push({ route, fp: fingerprint(providers[route], env[keyEnv]), kind: 'local', connectionName: 'this computer', instanceId: inst.id, modelId: inst.modelId, name: inst.label || inst.modelId, contextWindow: context, ...(shaped ? { shaped } : {}) });
@@ -329,6 +375,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   /** The models a helper agent may be started on: the table the model-choice plugin and the Harness's allow-list are written from. */
   const subagentRoutes = routes.map(r => ({ provider: r.route, model: r.modelId, name: r.name, connection: r.connectionName, local: r.kind === 'local' }));
   const entries = [
+    ...(archive ? [{ id: 'spill-local', config: { root: archiveRoot, cleanupPeriodDays: 0 } }] : []),
     ...(defaultRoute ? [{ id: 'agent-default-model', name: '@deepseek-ai/dsh-agent-default-model', config: { provider: defaultRoute.route, model: defaultRoute.modelId } }] : []),
     { id: 'llm-pi-ai', name: '@deepseek-ai/dsh-llm-pi-ai', config: { providers } },
     // The chat modes. Replacing the table also drops the Harness's own three presets: a chat is always in one of ours.
@@ -338,15 +385,15 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
     // Its web question names the search service the person chose (a keyed one only when its key is saved), and the person's switch skips the question.
     ...(gate ? [{ insert: [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: SEARCH_NAMES[keyed ?? 'builtin'], skipAsk: tools.webWithoutAsking === true } } }] }] : []),
     // Compaction decides from what the model server measured, and its summary requests always fit the window (plugins/strata-context.mjs).
-    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: { onDemandTools: onDemand } }] },
-    ...(onDemand ? [{ insert: [{ id: 'strata-on-demand-tools', name: ON_DEMAND_TOOLS_PLUGIN }] }] : []),
+    { insert: [{ id: 'strata-context', name: CONTEXT_PLUGIN, config: { onDemandTools: onDemand, ...contextPolicy, ...(archive ? { archiveRoot } : {}) } }] },
+    ...(onDemand ? [{ insert: [{ id: 'strata-on-demand-tools', name: ON_DEMAND_TOOLS_PLUGIN, ...(archive ? { config: { archiveToolResults: true } } : {}) }] }] : []),
     // Helper agents on a model the person names: every model the app can reach is allowed, and the plugin makes the choice forgiving (plugins/strata-models.mjs).
     ...(subagentRoutes.length ? [{ id: 'subagent-model-selection-settings', config: { enabled: true, allowedModels: subagentRoutes.map(r => ({ provider: r.provider, model: r.model })) } }] : []),
     ...(subagentRoutes.length ? [{ insert: [{ id: 'strata-models', name: MODELS_PLUGIN, config: { routes: subagentRoutes } }] }] : []),
     ...(mcp.length || ownRows.length ? [{ insert: [...mcp, ...ownRows] }] : []),
     ...webRows,
     // The reminder tools would be a second scheduler beside the app's Tasks. The tool groups the person switched off in Settings -> Tools are left out.
-    { id: 'preset-standard', name: '@deepseek-ai/dsh-agent-preset', config: standardPreset({ off: tools.off, search: searchOn, skillsDir, compaction, onDemand }) },
+    { id: 'preset-standard', name: '@deepseek-ai/dsh-agent-preset', config: standardPreset({ off: tools.off, search: searchOn, skillsDir, compaction, onDemand, archive: archive ? { name: TOOL_ARCHIVE_PLUGIN, config: archive } : null }) },
     // Strata names its chats itself; the Harness's own title request would be an extra model call on
     // every first prompt (and, for an API route, an unrequested one).
     { id: 'session-title-llm', disabled: true },
@@ -362,7 +409,7 @@ export function buildProfile({ local = [], connections = [], gate = true, tools 
   const signature = createHash('sha256').update(patch).update(JSON.stringify(Object.entries(env).sort())).digest('hex').slice(0, 16);
   // What the agent is offered (tool groups, web search, tool servers, the person's own tools) decides whether a running agent must be
   // restarted for the next message; the routes are compared separately (a changed context size alone does not restart it).
-  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), env.STRATA_SEARCH_KEY ?? '', mcpEnv])).digest('hex').slice(0, 16);
+  const toolsSignature = createHash('sha256').update(JSON.stringify([mcp, ownRows, webRows, entries.find(e => e.id === 'preset-standard'), env.STRATA_SEARCH_KEY ?? '', mcpEnv, ...(Object.keys(contextPolicy).length ? [contextPolicy] : [])])).digest('hex').slice(0, 16);
   return { patch, env, routes, defaultRoute, signature, toolsSignature, shapeTargets, mcpSkipped };
 }
 
