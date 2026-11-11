@@ -279,6 +279,10 @@ For testing. All are off unless set; the defaults are described above.
 | `STRATA_METAL_F16=1` / `=0` | Decode windows of a resident model: the GEMVs of Q2_0, Q3_K-Q6_K and IQ4_XS and the Q2_0 routed experts in fp16. On in the config setup writes for a resident IQ3_S or Q2_0 pack (M5 Max: decode +9 to +15%, top-1 96-97% and mean KL 0.009-0.016 against fp32; the 61-task quality suite passes the same tasks as with it off); `=0` in the config's `env` turns it off. Other sets: off unless set. M1 Max: a 2-token window's GPU time 56-60 -> 40-41 ms, mean KL 0.009 against fp32 |
 | `STRATA_METAL_TRACE=1`, `STRATA_METAL_PROFILE=1`, `STRATA_METAL_KPROF=T` | Per-window traces, a time breakdown, per-kernel GPU times |
 
+To choose an MTP draft vocabulary after setup, put `--mtp-draft-vocab FILE` in the model's `user_args`.
+Metal reads that file when it loads the draft head. `STRATA_METAL_DRAFT_VOCAB=FILE` still overrides the flag
+when both are set, for older run configs that use the environment variable.
+
 ## How it works
 
 The code is in `metal/` (the engine's side in `metal/src/engine`, the kernels in `metal/kernels`).

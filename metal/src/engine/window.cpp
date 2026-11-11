@@ -289,7 +289,7 @@ public:
     void activate(int set);
     void set_max_t(int t) { max_t_ = std::min(t, MAXT); }
     // ---- the MTP draft layer (mtp.hpp's math on mac-kern's kernels; the MTP GGUF from tools/mtp_pack.py)
-    bool mtp_load(const std::string& gguf, int max_t, std::string& err);
+    bool mtp_load(const std::string& gguf, int max_t, const std::string& draft_vocab, std::string& err);
     bool mtp_prefill(const int32_t* next_tokens, int64_t n, int64_t cell0, std::string& err);
     bool mtp_draft(int T, const int32_t* tokens, int64_t p, int a, int max_steps, int32_t* drafts, float* probs,
                    float min_p, int* n_drafts, std::string& err);
@@ -2717,7 +2717,7 @@ bool Window::commit(int n_keep, std::string& err) {
 
 
 // ================================================================================================ the MTP draft layer
-bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err) {
+bool Window::mtp_load(const std::string& gguf_path, int max_t, const std::string& draft_vocab, std::string& err) {
     (void) max_t;
     if (!fm_.open(gguf_path, err)) return false;
     madvise(fm_.map, fm_.map_bytes, MADV_WILLNEED);
@@ -2790,14 +2790,24 @@ bool Window::mtp_load(const std::string& gguf_path, int max_t, std::string& err)
         // the subset setup put beside the draft layer (--draft-vocab: <mtp>/rt/draft_vocab.bin, as CUDA reads it),
         // else the repository's default
         const std::string beside = gguf_path.substr(0, gguf_path.find_last_of('/') + 1) + "rt/draft_vocab.bin";
-        if (const char* e = std::getenv("STRATA_METAL_DRAFT_VOCAB")) vp = e;
+        const char* env_vocab = std::getenv("STRATA_METAL_DRAFT_VOCAB");
+        if (env_vocab) vp = env_vocab;
+        else if (!draft_vocab.empty()) vp = draft_vocab;
         else if (FILE* t = std::fopen(beside.c_str(), "rb")) { std::fclose(t); vp = beside; }
         else vp = strata_metal::resource(nullptr, "data", STRATA_METAL_DATA_DEFAULT) + "/draft_vocab.bin";
         FILE* f = vp == "full" ? nullptr : std::fopen(vp.c_str(), "rb");
+        if (!env_vocab && !draft_vocab.empty() && !f) {
+            err = "metal mtp: cannot open --mtp-draft-vocab " + draft_vocab;
+            return false;
+        }
         if (f) {
             int32_t id;
             while (std::fread(&id, 4, 1, f) == 1) if (id >= 0 && id < n_vocab_) dvocab_.push_back(id);
             std::fclose(f);
+        }
+        if (!env_vocab && !draft_vocab.empty() && dvocab_.empty()) {
+            err = "metal mtp: --mtp-draft-vocab has no usable token IDs: " + draft_vocab;
+            return false;
         }
         if (!dvocab_.empty()) {
             const gguf::Tensor& h = T("output.weight");
@@ -3909,8 +3919,9 @@ Window* g_window = nullptr;
 void window_register(void* w) { g_window = (Window*) w; }
 // the engine loads the drafter before the decode window exists: the path is kept and the window loads it at its init
 std::string g_mtp_path;
+std::string g_mtp_draft_vocab;
 int g_mtp_max_t = 0;
-bool mtp_load(const std::string& rt_dir, int max_t, std::string& err) {
+bool mtp_load(const std::string& rt_dir, int max_t, const std::string& draft_vocab, std::string& err) {
     (void) err;
     // the MTP model in GGUF form (tools/mtp_pack.py) beside the rt directory: STRATA_METAL_MTP_GGUF, else
     // <rt>/../mtp-q2_0.gguf
@@ -3923,6 +3934,7 @@ bool mtp_load(const std::string& rt_dir, int max_t, std::string& err) {
         path = (s == std::string::npos ? std::string(".") : d.substr(0, s)) + "/mtp-q2_0.gguf";
     }
     g_mtp_path = path;
+    g_mtp_draft_vocab = draft_vocab;
     g_mtp_max_t = max_t;
     return true;
 }
@@ -3931,7 +3943,7 @@ void mtp_bind_state(strata::core::QsaState& st) {
     if (g_the_window && g_the_window->mtp_ready()) g_the_window->bind_draft(st);
 }
 bool mtp_load_pending(Window* w, std::string& err) {
-    return g_mtp_path.empty() || w->mtp_load(g_mtp_path, g_mtp_max_t, err);
+    return g_mtp_path.empty() || w->mtp_load(g_mtp_path, g_mtp_max_t, g_mtp_draft_vocab, err);
 }
 // Prefill::run's Metal side: the prompt read through the window, MAXT rows at a time (no head), each window
 // committed; on_chunk (the MTP's K/V) after each, with the window's final residual rows in place.
