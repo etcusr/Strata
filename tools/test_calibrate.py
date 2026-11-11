@@ -292,6 +292,58 @@ class Calibrate(unittest.TestCase):
         self.assertNotIn("sh_stream", cuda["report"])
         self.assertTrue(all(e == {} for e in envs))
 
+    def test_metal_tiles(self):
+        # a Mac: the engine measures its tiles (STRATA_METAL_CALIBRATE) on the first start, then the tiles race the
+        # defaults with a restart each, both variables set explicitly; kept only when they win by more than MIN_GAIN
+        mac = ["--pack", "p", "--spec", "2", "--max-context", "8192"]   # a Mac config: no PC product defaults
+
+        def run(bonus, d):
+            envs = []
+
+            def start(args, env=None):
+                self.assertEqual(args, mac)                             # the config's own arguments, every start
+                envs.append(dict(env or {}))
+                if (env or {}).get(CAL.CALIBRATE):
+                    Path(env[CAL.CALIBRATE]).write_text("device Apple M1 Max\n")
+                tiles = bool((env or {}).get(CAL.TILES))
+                return FakeEngine(args, lambda f, p, w: 50.0 * (bonus if tiles else 1.0), 6)
+            res = CAL.measure_metal(mac, [[1, 2, 3]] * 3, start, say=lambda *_: None, tiles=Path(d) / "metal-tiles.txt")
+            return res, envs
+        with tempfile.TemporaryDirectory() as d:
+            res, envs = run(1.20, d)
+            tiles = str(Path(d) / "metal-tiles.txt")
+            self.assertEqual(res["env"], {CAL.TILES: tiles})
+            self.assertTrue(Path(tiles).exists() and not Path(d, "metal-tiles.new.txt").exists())
+            self.assertEqual(envs[0][CAL.TILES], "")                    # the measuring start reads no older tiles
+            self.assertTrue(all(set(e) == {CAL.CALIBRATE, CAL.TILES} for e in envs))   # never left to the config's env
+            self.assertEqual(sum(1 for e in envs[1:] if e[CAL.TILES]), CAL.SWEEP_ROUNDS)
+            self.assertGreater(res["report"]["tok_s"], 55.0)            # the reported speed is the tiles'
+            Path(tiles).unlink()
+            flat, _ = run(1.02, d)                                      # within noise: the defaults stay, no file
+            self.assertEqual(flat["env"], {})
+            self.assertFalse(Path(tiles).exists() or Path(d, "metal-tiles.new.txt").exists())
+
+    def test_engine_death_during_a_metal_round_keeps_the_run(self):
+        # the tiles' second engine exits mid-measurement: that round is dropped, the other rounds decide
+        mac = ["--pack", "p", "--spec", "2", "--max-context", "8192"]
+        tile_starts = []
+
+        def start(args, env=None):
+            if (env or {}).get(CAL.CALIBRATE):
+                Path(env[CAL.CALIBRATE]).write_text("device Apple M1 Max\n")
+            tiles = bool((env or {}).get(CAL.TILES))
+            e = FakeEngine(args, lambda f, p, w: 50.0 * (1.20 if tiles else 1.0), 6)
+            if tiles:
+                tile_starts.append(1)
+                e.dies = len(tile_starts) == 2
+            return e
+        with tempfile.TemporaryDirectory() as d:
+            tiles = str(Path(d) / "metal-tiles.txt")
+            res = CAL.measure_metal(mac, [[1, 2, 3]] * 3, start, say=lambda *_: None, tiles=Path(tiles))
+            self.assertEqual(res["env"], {CAL.TILES: tiles})
+            self.assertEqual(len(res["report"]["metal_tiles"]["tiles"]), 2 * (CAL.SWEEP_ROUNDS - 1))
+            self.assertIn("tiles", res["report"]["failed_starts"])
+
     def test_a_failed_fork_start_keeps_the_default(self):
         def start(args, env=None):
             if (env or {}).get(CAL.SH_STREAM) == "1":
@@ -318,6 +370,8 @@ class Calibrate(unittest.TestCase):
         self.assertEqual(CAL.apply_env(old, {}), {"STRATA_ROCBLAS_TUNING": "tools/hip"})   # an older choice goes
         self.assertEqual(CAL.apply_env({"X": "1"}, {CAL.SH_STREAM: "1"}), {"X": "1", CAL.SH_STREAM: "1"})
         self.assertEqual(CAL.apply_env(None, None), {})
+        mac = {"STRATA_METAL_STREAM": "0", "STRATA_METAL_F16": "1"}   # a Mac's own variables stay, an older tiles file goes
+        self.assertEqual(CAL.apply_env({**mac, CAL.TILES: "old.txt"}, {}), mac)
 
     def test_apply(self):
         a = CAL.apply(BASE, {"--pcie-frac": "0.35", "--pool-workers": "4"})
@@ -354,13 +408,30 @@ class Calibrate(unittest.TestCase):
                 seen.append((args, hip)) or {})
             fake = type("ST", (), {"Tokenizer": lambda *a: type("T", (), {"encode": lambda s, t, **k: [0]})()})
             try:
-                with mock.patch.dict(sys.modules, {"strata_tokenizer": fake}):
+                with mock.patch.dict(sys.modules, {"strata_tokenizer": fake}), mock.patch.object(CAL.sys, "platform", "linux"):
                     CAL.run({"tokenizer": d, "args": list(BASE), "gpu": [0]}, start_engine=lambda a: None)
                     CAL.run({"tokenizer": d, "args": list(BASE), "gpu": [0], "backend": "hip"}, start_engine=lambda a: None)
             finally:
                 CAL.measure = saved
         self.assertEqual(seen, [(BASE, False), (BASE, True)])         # the shared-expert step runs on AMD only
 
+    def test_metal_calibration_keeps_tiles_beside_installed_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            tok = root / "tokenizer"
+            tok.mkdir()
+            (tok / "vocab.json").write_text(json.dumps({"a": 0, "b": 1}))
+            (tok / "merges.txt").write_text("")
+            (tok / "token_type.json").write_text(json.dumps([1, 1]))
+            fake = type("ST", (), {"Tokenizer": lambda *a: type("T", (), {"encode": lambda s, t, **k: [0]})()})
+            with mock.patch.dict(sys.modules, {"strata_tokenizer": fake}), \
+                    mock.patch.object(CAL.sys, "platform", "darwin"), \
+                    mock.patch.object(CAL, "engine_args", return_value=BASE), \
+                    mock.patch.object(CAL, "measure_metal", return_value={}) as measure:
+                CAL.run({"tokenizer": str(tok), "args": BASE, "cwd": str(root / "versioned-control"),
+                         "calibration_dir": str(root / "install"), "model_name": "hybrid"},
+                        start_engine=lambda *a: None)
+            self.assertEqual(measure.call_args.args[4], root / "install" / "metal-tiles-hybrid.txt")
     def test_engine_error(self):
         with tempfile.TemporaryDirectory() as d:
             log = Path(d) / "strata-x.log"
@@ -478,6 +549,7 @@ class SetupIntegration(unittest.TestCase):
         self.assertNotIn("an earlier start", out.getvalue())
         out = io.StringIO()
         with mock.patch.object(self.S, "ROOT", Path(self.tmp.name)), \
+                mock.patch.object(sys, "platform", "linux"), \
                 mock.patch.object(self.S, "data_folder", lambda d, *a, **k: (Path(self.tmp.name) / "data", [])), \
                 mock.patch.object(self.S, "update_installed_engine", lambda *a: None), \
                 mock.patch.object(sys, "argv", ["setup.py", "--calibrate", "--no-start"]), \
