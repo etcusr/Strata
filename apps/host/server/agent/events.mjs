@@ -233,7 +233,12 @@ export class TurnProjector {
     this.running = [];               // callIds of tools that are running, oldest first
   }
 
-  #status(update) { if (this.onStatus) this.onStatus(update); }
+  #status(update) {
+    // The summarizer is another model request. Its reasoning and token stream must not replace
+    // the user-facing "Summarizing" status with an ordinary "Thinking" status.
+    if (this.summarizing && update.phase !== 'compacting') return;
+    if (this.onStatus) this.onStatus(update);
+  }
 
   /** After a tool ends: another tool still running is what is happening, otherwise the model is working out what to do next. */
   #afterTool() {
@@ -319,8 +324,12 @@ export class TurnProjector {
           this.tokensIn += prompt;
           this.tokensOut += Number(c.usage.outputTokens) || 0;
           this.lastOutput = Number(c.usage.outputTokens) || 0;
-          this.contextTokens = prompt + (Number(c.usage.outputTokens) || 0);
-          out.push({ type: 'context', contextTokens: this.contextTokens, contextMax: this.window || undefined });
+          // A compaction prompt is temporary work, not the remaining chat context. Publishing it
+          // makes the meter appear to shrink before the summary exists and then grow again.
+          if (!this.summarizing) {
+            this.contextTokens = prompt + (Number(c.usage.outputTokens) || 0);
+            out.push({ type: 'context', contextTokens: this.contextTokens, contextMax: this.window || undefined });
+          }
         }
       }
       return out;

@@ -233,6 +233,11 @@ test('compaction shows in the chat: a status line while it runs and one plain li
   assert.deepEqual(projector.consume({ type: 'event', event: { type: 'compaction/start', data: { compactionId: 'c' } } }), []);
   assert.equal(statuses.at(-1).code, 'compacting');
   assert.equal(statuses.at(-1).text, FIT_TEXT.summarizing);
+  projector.consume({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'summary', chunk: { type: 'reasoning-delta', text: 'Preparing the summary' } } });
+  assert.equal(statuses.at(-1).code, 'compacting', 'the summarizer thinking does not hide the compaction status');
+  const summaryUsage = projector.consume({ type: 'assistant-stream', frame: { type: 'chunk', attemptId: 'summary', chunk: { type: 'usage', usage: { inputTokens: 52000, outputTokens: 1000 } } } });
+  assert.equal(summaryUsage.some(f => f.type === 'context'), false, 'the summary request is not the new chat context');
+  assert.equal(projector.contextTokens, 59048);
   const done = projector.consume({ type: 'event', event: { type: 'compaction/end', data: { compactionId: 'c' } } });
   assert.equal(done.length, 1);
   assert.equal(done[0].key, FIT_TEXT.summarizedWas);
