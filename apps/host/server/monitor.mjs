@@ -5,6 +5,7 @@ import { readGpuTelemetry, gpuMemoryTotals } from './device-probes.mjs';
 import { createSystemSampler } from './system-telemetry.mjs';
 import { sensorPace, WATCH_MS } from './sensor-pace.mjs';
 import { readTemperatures, stopTemperatures } from './temperature-telemetry.mjs';
+import { readMacSensors, stopMacSensors } from './macos-sensors.mjs';
 import { addEnergy, energyWh } from './energy-meter.mjs';
 import { state as servingState } from './serving.mjs';
 import { originalDashboard } from './monitor-dashboard.mjs';
@@ -77,6 +78,7 @@ export function setLiveProbe(probe) { liveProbe = typeof probe === 'function' ? 
 let systemReading=null;
 /* CPU and SSD temperatures (null where this PC cannot give one) and the GPU energy used since the host started (#3628). */
 let temperatures={cpuTempC:null,ssdTempC:null};
+let macSensors=null;
 const sampleSystem=createSystemSampler();
 const finite = value => typeof value==='number'&&Number.isFinite(value);
 function aggregate(readings,key,mode='sum') {
@@ -100,7 +102,10 @@ function hardwareSnapshot() {
     gpuTempC:aggregate(readings,'temperatureC','max'),tempLimitC:hw.tempLimitC,
     powerW:aggregate(readings,'powerW'),powerLimitW:aggregate(readings,'powerLimitW'),
     pcieRxMbs:aggregate(readings,'pcieRxMbs'),
-    cpuTempC:demo?54:temperatures.cpuTempC,ssdTempC:demo?41:temperatures.ssdTempC,energyWh:round(energyWh(),3),
+    cpuTempC:demo?54:macSensors?.cpuTempC??temperatures.cpuTempC,
+    cpuPowerW:demo?null:macSensors?.cpuPowerW??null,
+    systemPowerW:demo?null:macSensors?.systemPowerW??null,
+    ssdTempC:demo?41:temperatures.ssdTempC,energyWh:round(energyWh(),3),
     diskReadGbs:systemReading?.diskReadGbs??null,diskWriteMbs:systemReading?.diskWriteMbs??null,
   };
 }
@@ -132,14 +137,29 @@ function tick() {
   if(!sensorsPending&&Date.now()-sensorsAt>=pace.intervalMs){
     sensorsPending=true;sensorsAt=Date.now();
     const hardware=cachedHardware()??hwCache;
+    const mac = process.platform === 'darwin' && process.env.STRATA_REAL_ENGINE === '1' && Date.now() < watchedUntil ? readMacSensors() : null;
     void Promise.all([readGpuTelemetry(hardware?.gpus??[],{transfer:pace.transfer}),sampleSystem(hardware?.processors??[]),(process.env.STRATA_REAL_ENGINE==='1'&&Date.now()<drivesUntil&&Date.now()-hostStartedAt>DRIVES_AFTER_MS?readTemperatures():Promise.resolve(temperatures)).catch(()=>({cpuTempC:null,ssdTempC:null}))])
-      .then(([readings,system,temps])=>{state.hardware.gpus=readings;systemReading=system;temperatures=temps;})
+      .then(([readings,system,temps])=>{
+        macSensors=mac;
+        if(mac){
+          const gpu=readings.find(r=>hardware?.gpus?.find(g=>g.id===r.id)?.unified);
+          if(gpu){
+            gpu.temperatureC=mac.gpuTempC;
+            gpu.powerW=mac.gpuPowerW;
+            gpu.utilizationPct=mac.gpuLoad;
+            gpu.clockMhz=mac.gpuClockMhz;
+            gpu.source='sensor';
+          }
+        }
+        state.hardware.gpus=readings;systemReading=system;temperatures=temps;
+      })
       .catch(()=>{state.hardware.gpus=[];systemReading=null;})
       .finally(()=>{sensorsPending=false;});
   }
   /* #4661: the drive-temperature reader asks every physical drive for its temperature. Only while the Monitor is looked at, never from the first second of the app
      (on some PCs the storage queries stall the whole system); it ends a couple of minutes after the Monitor was last seen. */
   if(Date.now()>drivesUntil+120000)stopTemperatures();
+  if(Date.now()>watchedUntil+5000) { stopMacSensors(); macSensors=null; }
   addEnergy(hardwareSnapshot().powerW,Date.now());
   const hw = state.hardware;
   const busy = state.phase === 'generating' || state.phase === 'reading' || state.phase === 'thinking';

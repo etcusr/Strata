@@ -151,9 +151,8 @@ test('a reply cut inside a file write: the chat says so, the agent is asked to g
   const r = await rig(t);
   const out = [];
   await r.bridge.runTurn({ ...r.base('c1', f => out.push(f)), message: 'SCRIPT:cutwrite big.txt' });
-  const said = out.find(f => f.type === 'delta' && f.noteReason === 'cut');
-  assert.ok(said, 'a sentence about the cut');
-  assert.match(said.text, /while writing big\.txt/); assert.match(said.text, /that write did not happen. I asked the assistant to look at what is on disk and write the rest in smaller parts/);
+  assert.ok(out.some(f => f.type === 'status' && f.code === 'retrying-cut'), 'recovery is shown as status');
+  assert.equal(out.some(f => f.type === 'delta' && f.noteReason === 'cut'), false, 'a recovered cut does not pollute the reply');
   assert.equal(out.filter(f => f.type === 'error').length, 0);
   const done = out.filter(f => f.type === 'done').at(-1);
   assert.equal(done.finishReason, 'stop', 'the turn ends on the agent\'s own finish, not on the cut');
@@ -174,7 +173,7 @@ test('a carry-on that contains only reasoning gets one more prompt and a visible
   const out = [];
   await r.bridge.runTurn({ ...r.base('c-silent', f => out.push(f)), message: 'SCRIPT:cutthink' });
   assert.equal(r.worker.requests.filter(q => q.directive === 'cutthink').length, 3);
-  assert.ok(out.some(f => f.type === 'delta' && f.noteReason === 'cut'));
+  assert.equal(out.some(f => f.type === 'delta' && f.noteReason === 'cut'), false);
   assert.match(words(out), /Recovered answer/);
   assert.equal(out.filter(f => f.type === 'done').at(-1)?.finishReason, 'stop');
   assert.equal(out.some(f => f.type === 'error'), false);
@@ -196,11 +195,20 @@ test(`a model that is cut every time is asked ${MAX_CUT_RETRIES} times, then the
   await r.bridge.runTurn({ ...r.base('c2', f => out.push(f)), message: 'SCRIPT:cutalways big.txt' });
   assert.equal(writes(r).length, MAX_CUT_RETRIES + 1);
   const notes = out.filter(f => f.type === 'delta' && f.noteReason === 'cut');
-  assert.equal(notes.length, MAX_CUT_RETRIES + 1, 'one sentence per cut');
+  assert.equal(notes.length, 1, 'one final notice, without repeated notices in the reply');
   assert.match(notes.at(-1).text, /that write did not happen\. Say “continue”/);
   const done = out.filter(f => f.type === 'done').at(-1);
   assert.ok(done, 'the turn ended');
   assert.equal(done.finishReason, 'length');
   assert.equal(done.cut.calls[0].target, 'big.txt');
   assert.equal(existsSync(join(r.ws, 'big.txt')), false, 'nothing half-written is left behind');
+});
+
+test('a local model looping in reasoning gets one retry and one final notice', { skip }, async t => {
+  const r = await rig(t);
+  const out = [];
+  await r.bridge.runTurn({ ...r.base('c-loop', f => out.push(f)), message: 'SCRIPT:cutloop' });
+  assert.equal(r.worker.requests.filter(q => q.directive === 'cutloop').length, 2);
+  assert.equal(out.filter(f => f.type === 'delta' && f.noteReason === 'cut').length, 1);
+  assert.equal(out.filter(f => f.type === 'done').at(-1)?.finishReason, 'length');
 });

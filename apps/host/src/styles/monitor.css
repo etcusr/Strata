@@ -1,6 +1,7 @@
 /* Original Monitor composition and chart geometry in the current design system. */
 .monitor-dashboard { --st-chart-decode: var(--st-accent); --st-chart-prefill: color-mix(in srgb,var(--st-accent) 65%,black); padding: 0; }
-.monitor-state { display: flex; flex-direction: column; gap: 14px; }
+.monitor-dashboard.stack--lg { gap: 16px; }
+.monitor-state { display: flex; flex-direction: column; gap: 8px; padding: 14px 18px; }
 .monitor-state__head { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 18px; }
 .monitor-state h2, .monitor-context h2, .monitor-requests h2, .monitor-cache h2, .monitor-mcp h2 { margin: 0; }
 .monitor-state__badges { display: flex; flex-wrap: wrap; gap: 7px; }
@@ -13,24 +14,21 @@
 .monitor-state__reading { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px 18px; }
 .monitor-device-selectors { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; max-width: 100%; }
 .monitor-device-selectors .select { width: auto; max-width: 280px; min-height: 32px; height: 32px; font-size: 12px; }
-.monitor-metrics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 16px; }
-.monitor-metric { min-width: 0; min-height: 172px; padding: 18px 20px; display: flex; flex-direction: column; gap: 16px; }
-.monitor-metric .st-metric__label { flex-wrap: wrap; gap: 6px; font-size: 12px; }
-.monitor-metric .st-metric__label .st-icon { flex: none; }
-.monitor-metric__source { margin-left: auto; color: var(--st-ink-muted); font-size: var(--st-fs-xs); font-weight: 400; }
-.monitor-metric .st-metric__value { font-size: clamp(22px,2.3vw,32px); overflow-wrap: anywhere; }
-.monitor-metric .st-metric__unit { font-size: 12px; white-space: nowrap; }
-.monitor-metric__sub { margin-top: 10px; min-height: 16px; line-height: 1.45; overflow-wrap: anywhere; }
-.monitor-speed-values { display: flex; justify-content: space-between; gap: 10px; }
-.monitor-speed-values > div { min-width: 0; }
-.monitor-speed-values > div:last-child { text-align: right; }
-.monitor-speed-values .st-metric__value { font-size: clamp(20px,2vw,28px); }
-/* The single-reading wrapper: the class Monitor.tsx has always put on the value
-   block, which no stylesheet defined. It sits where the two-reading wrapper
-   does, so a card without a second figure keeps the same baseline. */
-.monitor-metric__reading { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; min-width: 0; }
-.monitor-spark { margin-top: auto; height: 32px; flex: none; }
-.monitor-spark > svg { display: block; width: 100%; height: 32px; overflow: visible; }
+.monitor-groups { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 12px; align-items: stretch; }
+.monitor-group { min-width: 0; padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
+.monitor-group__title { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 14px; }
+.monitor-group__title .st-icon { color: var(--st-ink-muted); flex: none; }
+.monitor-group__rows { min-width: 0; display: flex; flex-direction: column; }
+.monitor-metric { min-width: 0; min-height: 47px; display: grid; grid-template-columns: minmax(0,1fr) 106px 68px; align-items: center; gap: 6px; padding: 6px 0; border-top: 1px solid var(--st-line); }
+.monitor-metric__name { min-width: 0; display: flex; flex-direction: column; gap: 1px; font-size: 12px; line-height: 1.2; }
+.monitor-metric__name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.monitor-metric__source { color: var(--st-ink-muted); font-size: 10px; line-height: 1.1; }
+.monitor-metric__reading { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) 49px; align-items: baseline; font-size: 18px; font-weight: 700; white-space: nowrap; }
+.monitor-metric__number { justify-self: end; font-variant-numeric: tabular-nums; }
+.monitor-metric__reading .st-metric__unit { justify-self: start; margin-left: 3px; font-size: 10px; font-weight: 400; color: var(--st-ink-muted); }
+.monitor-metric__chart { width: 68px; min-width: 0; grid-column: 3; }
+.monitor-spark { height: 26px; flex: none; }
+.monitor-spark > svg { display: block; width: 100%; height: 26px; overflow: visible; }
 .monitor-spark:focus-visible { outline: 1px solid var(--st-ink-muted); outline-offset: 4px; border-radius: 4px; }
 .monitor-spark .spark__readout { z-index: 2; top: -28px; max-width: max(100%,260px); font-size: 11px; white-space: normal; }
 .monitor-context-requests { display: grid; grid-template-columns: minmax(250px,1fr) minmax(0,2.4fr); gap: 16px; align-items: stretch; }
@@ -61,9 +59,8 @@
 .monitor-cache-facts dd { margin: 0; text-align: right; }
 .monitor-mcp { display: flex; flex-direction: column; gap: 18px; }
 .monitor-mcp-tools { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-@media (max-width: 1100px) {
-  .monitor-metric { padding: 16px; }
-  .monitor-metric__source { flex-basis: 100%; margin: 0; }
+@media (max-width: 1250px) {
+  .monitor-groups { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .monitor-cache-facts { grid-template-columns: 1fr; }
 }
 @media (max-width: 950px) {
@@ -74,7 +71,7 @@
   .monitor-context > .monitor-bar-reading, .monitor-context > .st-progress { grid-column: 2; }
 }
 @media (max-width: 767px) {
-  .monitor-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+  .monitor-groups { gap: 10px; }
   .monitor-device-selectors { margin: 0; width: 100%; }
   .monitor-device-selectors .select { max-width: 100%; }
   .monitor-context, .monitor-cache-bars, .monitor-cache-facts { display: flex; flex-direction: column; }
@@ -84,21 +81,7 @@
   .monitor-request-table .st-table { min-width: 620px; }
 }
 @media (max-width: 480px) {
-  .monitor-metric { padding: 12px; min-height: 182px; gap: 12px; }
-  .monitor-metric .st-metric__label { font-size: 11px; }
-  .monitor-metric .st-metric__value { font-size: 22px; }
-  .monitor-speed-values { gap: 6px; }
-  .monitor-speed-values .st-metric__value { font-size: 19px; }
-  .monitor-speed-values .st-metric__unit { font-size: 10px; margin-left: 2px; }
+  .monitor-groups { grid-template-columns: 1fr; }
+  .monitor-group { padding: 12px 14px; }
   .monitor-spark .spark__readout { right: auto; left: 0; max-width: 230px; }
-  .monitor-metric:nth-child(even) .monitor-spark .spark__readout { right: 0; left: auto; }
 }
-
-/* The energy and temperature readings (#3628): one thin row under the cards, a label and a value each, wrapping to 3 and 2 columns on narrow windows. */
-.monitor-readings { padding: 12px 20px; }
-.monitor-readings dl { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 24px; }
-.monitor-readings dl > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.monitor-readings dt { color: var(--st-ink-muted); font-size: 12px; }
-.monitor-readings dd { margin: 0; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
-@media (max-width: 1100px) { .monitor-readings dl { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@media (max-width: 640px) { .monitor-readings { padding: 12px 16px; } .monitor-readings dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

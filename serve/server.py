@@ -224,7 +224,7 @@ DS41_DEFAULT_BUDGET = 32768   # DeepSeek-V4.1 only: the thinking budget when nei
 DS41_SMALL_CAP_MIN = 48       # DeepSeek-V4.1 only: from this max_tokens up to ANSWER_ROOM_MIN_CAP, thinking is capped at half of it
 ANSWER_RESERVE_MIN = 512     # #984: the tokens kept for the answer when a thinking budget is cut down to fit max_tokens
 # #123: what closes the thinking when it reaches reasoning_budget_tokens (the model's own end-of-thinking tag after it)
-# #1053 (opt-in "reasoning_close_retry": true): a reply that ends on its stop token still inside <think>, with no answer
+# #1053 (disable with "reasoning_close_retry": false): a reply that ends on its stop token still inside <think>, with no answer
 # and no call, is continued once with the thinking closed (the same way the budget's wrap-up closes it)
 REASONING_CLOSE = "\n</think>\n\n"
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
@@ -4793,7 +4793,7 @@ class Service:
         self.fit_max_tokens = fit_max_tokens          # default: clamp the output cap to the room left; False (--no-fit-max-tokens) = 400
         self.aliases: list[str] = []                  # #297: other names of the model (the config's `aliases`)
         self.answer_room = True                       # 0.1.45: see ANSWER_ROOM_MIN_CAP (the config's "answer_room": false turns it off)
-        self.reasoning_close_retry = False            # #1053 (opt-in): close the thinking once when a reply ends inside it
+        self.reasoning_close_retry = True             # #1053: close the thinking once when a reply ends inside it
         self.codex_compaction_cache = False           # #924 (opt-in): a Codex compaction is rendered with its conversation's tools
         self.codex_thread_titles = False              # #923 (opt-in): answer Codex's thread-title turns without the engine
         self.sampling_defaults = dict(sampling_defaults or {})   # the run config's `sampling` block
@@ -6288,6 +6288,7 @@ class Service:
         nf_retried = False                              # #879: the request was sent again after non-finite logits
         timings, before = None, None                    # this request's timings; the engine's `last` before it
         recovery_count, reasoning_text, repeat_coverage = 0, "", 0.0
+        repeat_recovered = False
         looped, next_loop_check = False, LOOP_CHECK_EVERY       # #728: reasoning that repeats whole passages
         raw_ids = []                                    # every generated id (STRATA_DEBUG: dump raw model text)
         admission_rejected = False                      # #3040: the engine's batch slots refused it before it read anything
@@ -6406,6 +6407,7 @@ class Service:
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
                         recover_prompt = None
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
+                        wrap_reason = 'budget'
                         nonfinite = False               # #879: the engine ended this pass on non-finite logits
                         opens = False                   # the thinking is over: write the forced call's opening
                         try:
@@ -6443,9 +6445,7 @@ class Service:
                                 thinking_n += parser.state in ("reasoning", "rcall")
                                 run_len = run_len + 1 if t == run_tok else 1
                                 run_tok = t
-                                if self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens:
-                                    repeated = True     # #606: a degenerate output, not an answer: end it here
-                                    break
+                                repeating = bool(self.repeat_stop_tokens and run_len >= self.repeat_stop_tokens)
                                 piece = detok.push(t)
                                 tail = (tail + piece)[-2:]
                                 evs = cut(parser.feed(piece))
@@ -6484,6 +6484,21 @@ class Service:
                                     if thought >= budget and parser.clean and not detok.pending():
                                         wrap = True
                                         break
+                                if repeating:
+                                    # A single-token loop in hidden reasoning is not an output-limit failure.
+                                    # Close thinking once and give the model the remaining room for an answer.
+                                    if (thinking and parser.state == "reasoning" and not repeat_recovered
+                                            and max_new - n >= ANSWER_RESERVE_MIN and parser.clean
+                                            and not detok.pending()):
+                                        repeat_recovered = True
+                                        run_len = 0
+                                        wrap = True
+                                        wrap_reason = 'repetition'
+                                        print(f"[strata] repeated one token in reasoning at {n} tokens: "
+                                              "closing thinking and continuing once", flush=True)
+                                    else:
+                                        repeated = True
+                                    break
                                 if force:
                                     if any(ev.kind in ("tool_start", "tool_call") for ev in evs):
                                         force = None    # the model is writing a call of its own
@@ -6601,7 +6616,7 @@ class Service:
                         if max_new - n - len(extra) < 1:
                             break                       # no room left to answer: "length", as without a budget
                         if wrap:
-                            print(f"[strata] thinking budget reached ({thought} tokens): wrapping up the thinking",
+                            print(f"[strata] thinking {wrap_reason} at {thought} tokens: wrapping up the thinking",
                                   flush=True)
                         for t in extra:
                             n += 1
@@ -10279,7 +10294,7 @@ def _main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> i
         per_replica = requested if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0 else 1
         svc.requested_slots = per_replica * len(groups) if groups else per_replica
     svc.answer_room = cfg.get("answer_room") is not False
-    svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is True    # #1053: opt-in, off by default
+    svc.reasoning_close_retry = cfg.get("reasoning_close_retry") is not False    # #1053: default on; explicit false disables
     if cfg.get("images"):                               # image generation (serve/images.py), set up by setup --images
         icfg = {k: (os.path.abspath(os.path.join(cfg.get("cwd") or ".", v))
                     if k in ("exe", "diffusion_model", "vae", "llm", "out_dir") and isinstance(v, str)

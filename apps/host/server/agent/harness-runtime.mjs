@@ -36,6 +36,16 @@ export function agentEnvironment(base = process.env, extra = {}) {
   return { ...out, DSH_TELEMETRY_DISABLED: '1', DSH_PERMISSION_MODE: 'read-only', NODE_USE_SYSTEM_CA: '1', ...extra };
 }
 
+/** Finder can start the app without Homebrew on PATH. Add only a directory that actually contains rg. */
+export function agentExecutablePath(basePath, harnessDir, { platform = process.platform, arch = process.arch, exists = existsSync } = {}) {
+  if (platform !== 'darwin') return basePath;
+  const original = String(basePath ?? '').split(':').filter(Boolean);
+  const candidates = ['/opt/homebrew/bin', '/usr/local/bin'];
+  if (harnessDir) candidates.push(join(harnessDir, 'node_modules', '@vscode', `ripgrep-${platform}-${arch}`, 'bin'));
+  const extra = candidates.filter(dir => exists(join(dir, 'rg')) && !original.includes(dir));
+  return [...extra, ...original].join(':');
+}
+
 /**
  * Find a usable Harness. Returns `{ ok:true, dir, bin, version }` or `{ ok:false, reason }`; the reason
  * is user-readable because it becomes the capability state shown in the app.
@@ -77,9 +87,11 @@ export class HarnessProcess {
     mkdirSync(this.home, { recursive: true });
     mkdirSync(this.cwd, { recursive: true });
     const args = [this.harness.bin, '--profile', 'web', '--patch', this.patchFile, '--port', '0', '--no-open'];
+    const childEnv = agentEnvironment(process.env, { ...this.extraEnv, DSH_HOME: this.home });
+    childEnv.PATH = agentExecutablePath(childEnv.PATH, this.harness.dir);
     const child = spawn(this.nodePath, args, {
       cwd: this.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-      env: agentEnvironment(process.env, { ...this.extraEnv, DSH_HOME: this.home }),
+      env: childEnv,
     });
     this.#child = child;
     let text = '';

@@ -32,5 +32,11 @@
  "gh31": "Währung ändern",
  "gh32": "Automatisch ({0})",
  "gh33": "Währung",
- "gh34": "weniger als {0}"
+ "gh34": "weniger als {0}",
+ "gh35": "CPU-Leistung",
+ "gh36": "Systemleistung",
+ "gh37": "Auslastung und Speicher",
+ "gh38": "Leistung und Energie",
+ "gh39": "GPU-Energie seit Start",
+ "gh40": "GPU-Kosten seit Start"
 }

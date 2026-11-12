@@ -2075,7 +2075,7 @@ async function api(req, res, path, method, url) {
     // A Time-skip trial of this chat is stopped by the same Stop button (and cleans up its copies).
     const trialId = trialByChat.get(b.sessionId);
     if (trialId) return json(res, 200, { stopped: await stopTrial(trialId), ended: 'time-skip' });
-    try { return json(res, 200, await agent.stop(b.sessionId, { saveOnStop: true })); } catch (e) { return error(res, 502, e.message); }
+    try { return json(res, 200, await agent.stop(b.sessionId)); } catch (e) { return error(res, 502, e.message); }
   }
 
   // --- chat ---------------------------------------------------------------

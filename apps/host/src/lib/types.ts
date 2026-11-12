@@ -289,6 +289,8 @@ export interface MonitorState {
     pcieRxMbs?: number | null;
     /** CPU and SSD temperatures (only where this PC can give one) and the GPU energy used since the host started, in Wh (#3628). */
     cpuTempC?: number | null;
+    cpuPowerW?: number | null;
+    systemPowerW?: number | null;
     ssdTempC?: number | null;
     energyWh?: number | null;
     diskReadGbs?: number | null;

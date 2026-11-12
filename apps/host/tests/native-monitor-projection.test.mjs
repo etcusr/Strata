@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {build} from 'esbuild';
 const result=await build({entryPoints:['src/lib/native-monitor.ts'],bundle:true,platform:'node',format:'esm',write:false});
-const {nativeMonitorData}=await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+const {nativeMonitorData,withHostSensors}=await import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 const inventory={memory:{totalGb:64},gpus:[{id:'gpu0',index:0,vramGb:24,unified:false}]};
 const instance={id:'one',model:'q2_0',label:'Qwen3.8-Flash-Next',context:32768,gpus:[0],phase:'generating',loadedAt:'2026-10-14T10:00:00Z',metrics:{time:100,live:{state:'generating',prompt_tokens:1000,generated:20,tok_s:12,prefill_tok_s_mean:250,queued:0},engine:{max_context:32768,expert_slots:32,experts:256},hardware:{cpu:30,ram_used:16*1024**3,ram_total:64*1024**3,gpu_mem_used:10*1024**3,gpu_util:80,gpu_temp:60},history:{tok_s:[10,null,12],gpu_mem_used:[9*1024**3,null,10*1024**3]},requests:[{id:'request',time:90,prompt_tokens:1000,reused:500,output_tokens:100,decode_tok_s:10,prompt_ms:2000,duration_s:10}],totals:{requests:1,prompt_tokens:1000,reused:500,output_tokens:100,prompt_ms:2000,decode_ms:10000}}};
 test('native facts feed existing charts, context and request history with correct units',()=>{
@@ -13,6 +13,17 @@ test('native facts feed existing charts, context and request history with correc
 test('missing native measurements stay unknown and do not use demo readings',()=>{
  const data=nativeMonitorData({instances:[{...instance,metrics:null}],hardware:{gpus:[{index:0}]}},inventory);
  assert(Number.isNaN(data.outputTps));assert.equal(data.hardware.ramUsedGb,null);assert.equal(data.hardware.gpus[0].utilizationPct,null);assert.equal(data.telemetry.throughput,'unavailable');assert.deepEqual(data.history,[]);assert(Number.isNaN(data.context.usedTokens));
+});
+test('host temperature and power fill missing native GPU fields while native utilization remains',()=>{
+ const live=nativeMonitorData({instances:[instance],hardware:{gpus:[{index:0}]}},inventory);
+ live.hardware.gpus[0].temperatureC=null;live.hardware.gpus[0].powerW=null;
+ const merged=withHostSensors(live,{hardware:{gpus:[{id:'gpu0',temperatureC:46,powerW:2,source:'sensor'}],cpuTempC:49,cpuPowerW:3,systemPowerW:18}});
+ assert.equal(merged.hardware.gpus[0].utilizationPct,80);
+ assert.equal(merged.hardware.gpus[0].temperatureC,46);
+ assert.equal(merged.hardware.gpus[0].powerW,2);
+ assert.equal(merged.hardware.gpus[0].source,'sensor');
+ assert.equal(merged.hardware.cpuPowerW,3);
+ assert.equal(merged.hardware.systemPowerW,18);
 });
 test('model scope filters requests and does not add system RAM once per model',()=>{
  const other={...instance,id:'two',model:'other',metrics:{...instance.metrics,time:101,hardware:{...instance.metrics.hardware,ram_used:20*1024**3},requests:[]}};

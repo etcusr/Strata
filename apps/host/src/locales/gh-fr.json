@@ -32,5 +32,11 @@
  "gh31": "Changer de devise",
  "gh32": "Automatique ({0})",
  "gh33": "Devise",
- "gh34": "moins de {0}"
+ "gh34": "moins de {0}",
+ "gh35": "Puissance CPU",
+ "gh36": "Puissance du système",
+ "gh37": "Charge et mémoire",
+ "gh38": "Puissance et énergie",
+ "gh39": "Énergie GPU depuis le démarrage",
+ "gh40": "Coût GPU depuis le démarrage"
 }

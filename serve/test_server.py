@@ -4223,7 +4223,7 @@ class EndsInsideThinkingEngine(ThinkingEngine):
 
 
 class ReasoningCloseRetry(unittest.TestCase):
-    """#1053 (opt-in): a reply that ends inside <think> with no answer is continued once with the thinking closed."""
+    """#1053: a reply that ends inside <think> with no answer is continued once with the thinking closed."""
 
     def setUp(self):
         self.tok = ByteTokenizer()
@@ -4243,13 +4243,13 @@ class ReasoningCloseRetry(unittest.TestCase):
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode())["choices"][0]
 
-    def test_off_by_default_the_reply_stays_empty(self):
+    def test_explicitly_disabled_the_reply_stays_empty(self):
+        self.svc.reasoning_close_retry = False
         c = self.chat()
         self.assertEqual(self.engine.prompts.__len__(), 1)
         self.assertFalse(c["message"].get("content"))
 
-    def test_on_it_closes_the_thinking_once_and_answers(self):
-        self.svc.reasoning_close_retry = True
+    def test_default_closes_the_thinking_once_and_answers(self):
         c = self.chat()
         self.assertEqual(len(self.engine.prompts), 2)
         self.assertTrue(self.tok.decode(self.engine.prompts[1]).endswith("</think>" + chr(10) + chr(10)))

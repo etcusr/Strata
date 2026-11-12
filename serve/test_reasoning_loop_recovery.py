@@ -36,6 +36,17 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(reasoning_repeat_coverage(' '.join(str(i) for i in range(4000))), 0)
         self.assertGreater(reasoning_repeat_coverage(self.loop), .9)
 
+    def test_single_token_thinking_loop_closes_thinking_once(self):
+        engine = RecordingEngine(self.tok, ['!' * 300, 'Recovered answer.'])
+        service = Service(engine, self.tok, None)
+        events = list(service.run(self.ids, True, [], 4000, {}, threading.Event()))
+        done = [value for kind, value in events if kind == 'done'][0]
+        self.assertEqual(done['finish'], 'stop')
+        self.assertEqual(len(engine.calls), 2)
+        self.assertIn('</think>', self.tok.decode(engine.calls[1][0]))
+        self.assertIn('Recovered answer', ''.join(value.text for kind, value in events
+                                                  if kind == 'event' and value.kind == 'content'))
+
     def test_a_loop_written_as_one_long_word(self):
         """#1753: a 24k-digit string cycling an 11-digit pattern is one word to the split and never one token twice."""
         self.assertEqual(reasoning_repeat_coverage('Counting the digits of 9^104. ' + '58747693387' * 3000), 1)
@@ -60,6 +71,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
         service = Service(engine, self.tok, None)
         service.answer_room = False      # these cases test the loop guards at the cap itself
         service.reasoning_loop_recovery = enabled
+        if not enabled: service.reasoning_close_retry = False
         events = list(service.run(self.ids, True, [], 40000, {}, threading.Event()))
         return engine, events
 
@@ -174,6 +186,7 @@ class ReasoningLoopRecovery(unittest.TestCase):
         service = Service(engine, self.tok, None)
         service.answer_room = False      # these cases test the loop guards at the cap itself
         service.reasoning_loop_recovery = True
+        service.reasoning_close_retry = False  # test the loop guard in isolation
         ids = self.tok.encode('<|im_start|>user\nTask<|im_end|>\n', parse_special=True)
         events = list(service.run(ids, True, [], 40000, {}, threading.Event()))
         self.assertEqual(len(engine.calls), 1)

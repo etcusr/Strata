@@ -128,37 +128,18 @@ test('A05 Stop cancels exactly that chat, waits for the turn to end, and leaves 
   assert.equal(text(again.frames), 'after stop');
 });
 
-test('Stop saves a supported local session before ending the turn', { skip }, async t => {
+test('Stop cancels without writing a conversation snapshot', { skip }, async t => {
   const r = await rig(t, { slotSave: async () => ({ n_saved: 40_000 }) });
   const run = r.run('chat-stop-save', 'SCRIPT:slow 400');
   assert.ok(await until(() => run.frames.some(f => f.type === 'delta'), 15_000));
-  const first = await r.bridge.stop('chat-stop-save', { saveOnStop: true });
-  assert.equal(first.saving, true);
+  const first = await r.bridge.stop('chat-stop-save');
+  assert.equal(first.stopped, true);
   await run.promise;
-  assert.equal(r.worker.slotRequests.length, 1);
-  assert.ok(run.frames.some(f => f.type === 'context-snapshot' && f.state === 'saved'));
+  assert.equal(r.worker.slotRequests.length, 0);
+  assert.ok(!run.frames.some(f => f.type === 'context-snapshot'));
   assert.equal(run.frames.at(-1).type, 'done');
-  assert.ok(JSON.parse(readFileSync(join(r.dir, 'agent', 'session-snapshots.json'), 'utf8')).records['chat-stop-save']);
-});
-
-test('a second Stop skips the in-progress snapshot and finishes promptly', { skip }, async t => {
-  let release;
-  const saving = new Promise(resolve => { release = resolve; });
-  t.after(() => release({ n_saved: 40_000 }));
-  const r = await rig(t, { slotSave: () => saving });
-  const run = r.run('chat-stop-skip', 'SCRIPT:slow 400');
-  assert.ok(await until(() => run.frames.some(f => f.type === 'delta'), 15_000));
-  assert.equal((await r.bridge.stop('chat-stop-skip', { saveOnStop: true })).saving, true);
-  assert.ok(await until(() => r.worker.slotRequests.length === 1, 15_000), 'the save has started');
-  const started = Date.now();
-  assert.equal((await r.bridge.stop('chat-stop-skip', { saveOnStop: true })).skipped, true);
-  await run.promise;
-  assert.ok(Date.now() - started < 3_000, 'the chat ends without waiting for the disk save');
-  assert.ok(run.frames.some(f => f.type === 'context-snapshot' && f.state === 'skipped'));
-  release({ n_saved: 40_000 });
-  await new Promise(resolve => setTimeout(resolve, 100));
   const index = join(r.dir, 'agent', 'session-snapshots.json');
-  assert.ok(!existsSync(index) || !JSON.parse(readFileSync(index, 'utf8')).records['chat-stop-skip']);
+  assert.ok(!existsSync(index) || !JSON.parse(readFileSync(index, 'utf8')).records['chat-stop-save']);
 });
 
 test('A05b Stop while an approval is pending denies it and ends the turn', { skip }, async t => {

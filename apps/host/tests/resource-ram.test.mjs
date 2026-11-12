@@ -93,15 +93,14 @@ test('full performance takes the RAM settings of either engine out again and kee
   assert.equal(resourceSettings(config, pc64, 'performance', iq3sNew).env, undefined, 'performance from the start: nothing is passed, the whole system is used');
 });
 
-test('Performance extra RAM lowers only the conversation save reserve and is removed in Work mode', () => {
-  const tuned=resourceSettings(config,pc64,'performance',iq3sNew,{performance_extra_ram_mib:512});
-  assert.equal(flag(tuned.args,'--conversation-cache-min-free-mib'),'2048');
-  assert.equal(tuned.ui_performance_extra_ram_mib,512);
-  const work=resourceSettings({...config,...tuned,ui_resource_profile:'performance'},pc64,'work',iq3sNew);
-  assert.equal(work.args.includes('--conversation-cache-min-free-mib'),false);
-  const again=resourceSettings({...config,...work,ui_resource_profile:'work'},pc64,'performance',iq3sNew);
-  assert.equal(flag(again.args,'--conversation-cache-min-free-mib'),'2048');
-  assert.throws(()=>resourceSettings(config,pc64,'performance',iq3sNew,{performance_extra_ram_mib:1536}),/1024 MiB/);
+test('an old app-generated conversation save reserve is removed on settings update', () => {
+  const old={...config,args:[...config.args,'--conversation-cache-min-free-mib','2048'],ui_performance_extra_ram_mib:512,ui_resource_baseline:{snapshotFloor:true}};
+  for(const profile of ['work','performance']){
+    const result=resourceSettings(old,pc64,profile,iq3sNew);
+    assert.equal(result.args.includes('--conversation-cache-min-free-mib'),false);
+    assert.equal(result.ui_performance_extra_ram_mib,undefined);
+    assert.equal(result.ui_resource_baseline.snapshotFloor,undefined);
+  }
 });
 
 test('switching the engine in the Engine tab between loads swaps the rule: new -> old and old -> new', () => {

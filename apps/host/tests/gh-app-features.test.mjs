@@ -66,12 +66,12 @@ test('nvidia-smi fan and clock are read, an unsupported field is no reading', ()
   assert.equal(c.fanPct, null);
 });
 
-test('the readings strip lists only what this PC can read and the Settings has the price', () => {
+test('Monitor groups measurements and omits unavailable optional sensors', () => {
   const monitor = readFileSync(new URL('../src/screens/Monitor.tsx', import.meta.url), 'utf8');
-  for (const label of ['Energy since start', 'Cost since start', 'GPU fan', 'GPU clock', 'CPU temperature', 'SSD temperature']) assert.ok(monitor.includes(`'${label}'`), label);
-  assert.match(monitor, /\.filter\(\(line\): line is/);
-  assert.match(monitor, /readingsStrip\.length \? <section className="st-card monitor-readings"/, 'the whole strip is left out when no reading is available');
-  assert.doesNotMatch(monitor, /lines=\{/, 'the Power card keeps its old height');
+  for (const label of ['Performance', 'Load and memory', 'Temperature', 'Power and energy', 'GPU fan', 'GPU clock', 'CPU temperature', 'SSD temperature', 'CPU power', 'System power', 'GPU energy since start']) assert.ok(monitor.includes(`"${label}"`) || monitor.includes(`'${label}'`), label);
+  assert.match(monitor, /hasReading\(data\.hardware\.ssdTempC\) \? <MonitorMetric/, 'optional sensors are left out when unavailable');
+  assert.match(monitor, /className="monitor-groups"/);
+  assert.doesNotMatch(monitor, /readingsStrip/, 'readings belong to their groups');
   const settings = readFileSync(new URL('../src/screens/Settings.tsx', import.meta.url), 'utf8');
   assert.match(settings, /label: 'Electricity price'/);
 });

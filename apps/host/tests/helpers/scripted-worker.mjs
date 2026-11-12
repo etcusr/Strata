@@ -173,6 +173,10 @@ export async function startScriptedWorker({ port = 0, chunkDelayMs = 40, model =
       send({ tool_calls: [{ index: 0, id: `call_${requests.length}`, type: 'function', function: { name: 'web_search', arguments: argsJson } }] });
       return finish('tool_calls', 60);
     }
+    if (directive?.[1] === 'cutloop') {
+      send({ role: 'assistant', content: '', reasoning_content: '!' });
+      return finish('length', 1500);
+    }
     if (directive?.[1] === 'cutthink' || directive?.[1] === 'cutthinkalways') {
       if (directive[1] === 'cutthink' && messages.some(m => m.role === 'user' && /continuation ended without a visible answer/.test(text(m)))) return say(['Recovered answer.']);
       send({ role: 'assistant', content: '', reasoning_content: 'Thinking without giving the user an answer.' });

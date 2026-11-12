@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startScriptedWorker } from './helpers/scripted-worker.mjs';
 import { createAgentBridge } from '../server/agent/agent-bridge.mjs';
-import { resolveHarness } from '../server/agent/harness-runtime.mjs';
+import { agentExecutablePath, resolveHarness } from '../server/agent/harness-runtime.mjs';
 import { buildProfile, GATE_PLUGIN } from '../server/agent/profile.mjs';
 import { STANDARD_PLUGIN_IDS, REMOVED_PLUGIN_IDS, standardPreset } from '../server/agent/preset.mjs';
 import { isReadOnlyShell, manualDecision, maskQuotes, READ_ONLY_TOOLS } from '../server/agent/plugins/strata-gate.mjs';
@@ -25,6 +25,16 @@ const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARN
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 const shellTool = process.platform === 'win32' ? 'pwsh' : 'bash';
+const compactNames = [shellTool, 'job_list', 'tool_catalog', 'tool_dispatch'].sort();
+
+test('a Finder launch still makes the bundled ripgrep available to the agent shell', () => {
+  const bundled = '/bundle/node_modules/@vscode/ripgrep-darwin-arm64/bin';
+  const path = agentExecutablePath('/usr/bin:/bin', '/bundle', { platform: 'darwin', arch: 'arm64',
+    exists: file => file === `${bundled}/rg` });
+  assert.equal(path, `${bundled}:/usr/bin:/bin`);
+  assert.equal(agentExecutablePath(path, '/bundle', { platform: 'darwin', arch: 'arm64', exists: file => file === `${bundled}/rg` }), path);
+  assert.equal(agentExecutablePath('/usr/bin:/bin', '/bundle', { platform: 'linux' }), '/usr/bin:/bin');
+});
 
 // ---------------------------------------------------------------------------------------------------------- pure
 
@@ -118,7 +128,7 @@ test('on-demand categories separate browser backends and hide unrequested schema
   assert.equal(category('mcp__browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
-  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'job_list']);
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'job_list']);
 });
 
 test('large JSON web results are condensed before the model sees them', async () => {
@@ -197,7 +207,7 @@ test('on-demand tool schemas stay stable after catalog and on a later greeting',
   const frames = await r.run('catalog', 'SCRIPT:call tool_catalog {"groups":["files","shell"]}');
   assert.match(last(frames).result, /BatchMode=yes/);
   const first = r.worker.requests.at(-2), loaded = r.worker.requests.at(-1);
-  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.deepEqual(first.toolNames, compactNames);
   assert.deepEqual(loaded.toolNames, first.toolNames, 'catalog does not invalidate the cached prompt prefix');
   assert.deepEqual(JSON.parse(first.raw).tools, JSON.parse(loaded.raw).tools, 'complete schemas stay byte-identical after catalog');
   assert.match(last(frames).result, /"name":"read"/);
@@ -215,11 +225,33 @@ test('on-demand tools can be dispatched on a later turn without changing request
   const r = await rig(t, { onDemand: true });
   await r.run('jobs-resume', 'SCRIPT:call job_list {}');
   const first = r.worker.requests.at(-2);
-  assert.deepEqual(first.toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.deepEqual(first.toolNames, compactNames);
   const frames = await r.call('jobs-resume', 'tool_dispatch', { name: 'job_list', arguments: {} });
   assert.match(last(frames).result, /job_list/);
   const resumed = r.worker.requests.at(-1);
   assert.deepEqual(resumed.toolNames, first.toolNames);
+});
+
+test('the direct shell runs rg without a catalog step or an approval for read-only search', { skip: skip || process.platform === 'win32' }, async (t) => {
+  const r = await rig(t, { onDemand: true });
+  writeFileSync(join(r.ws, 'needle.txt'), 'needle');
+  const frames = await r.call('direct-search', 'bash', { command: 'rg --files', description: 'Find files' }, { mode: 'manual' });
+  assert.match(last(frames)?.result ?? '', /needle\.txt/);
+  assert.ok(!cards(frames).some(card => card.state === 'proposed'), 'read-only rg never asks for permission');
+  assert.deepEqual(r.worker.requests[0].toolNames, compactNames);
+  assert.equal(cards(frames).filter(card => card.name === 'tool_catalog' || card.name === 'tool_dispatch').length, 0);
+  const denied = await r.call('direct-change', 'bash', { command: 'touch should-not-exist', description: 'Create a marker' }, { mode: 'manual', answer: 'deny' });
+  assert.ok(cards(denied).some(card => card.state === 'proposed'), 'a direct mutating shell call still asks');
+  assert.equal(existsSync(join(r.ws, 'should-not-exist')), false);
+});
+
+test('an incomplete dispatcher argument cannot run a command', { skip: skip || process.platform === 'win32' }, async (t) => {
+  const r = await rig(t, { onDemand: true });
+  const frames = await r.call('broken-dispatch', 'tool_dispatch', {
+    name: 'bash', arguments: '{"command":"touch should-not-exist","timeout":',
+  }, { mode: 'bypass' });
+  assert.ok(cards(frames).some(card => card.state === 'error'));
+  assert.equal(existsSync(join(r.ws, 'should-not-exist')), false);
 });
 
 test('on-demand dispatch keeps the named tool permission check', { skip }, async (t) => {
@@ -246,7 +278,7 @@ test('on-demand connected tools stay hidden until the model requests them', { sk
   const mcpServers = { demo: { command: process.execPath, args: [fwd(join(import.meta.dirname, 'helpers', 'mini-mcp.mjs'))] } };
   const r = await rig(t, { onDemand: true, mcpServers });
   await r.run('mcp-catalog', 'SCRIPT:call tool_catalog {"groups":["connected"]}');
-  assert.deepEqual(r.worker.requests.at(-2).toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.deepEqual(r.worker.requests.at(-2).toolNames, compactNames);
   const loaded = r.worker.requests.at(-1).toolNames;
   assert.deepEqual(loaded, r.worker.requests.at(-2).toolNames);
   const result = await r.call('mcp-catalog', 'tool_dispatch', { name: 'mcp__demo__shout', arguments: { text: 'hello' } }, { mode: 'bypass' });
@@ -258,10 +290,11 @@ test('a short web task sends small requests even after loading web tools', { ski
   await r.run('weather', 'SCRIPT:weather');
   const requests = r.worker.requests;
   assert.equal(requests.length, 4, 'catalog, search, fetch, answer');
-  assert.deepEqual(requests[0].toolNames, ['job_list', 'tool_catalog', 'tool_dispatch']);
+  assert.deepEqual(requests[0].toolNames, compactNames);
   assert.ok(requests.slice(1).every(q => JSON.stringify(q.toolNames) === JSON.stringify(requests[0].toolNames)));
-  assert.ok(requests.every(q => q.promptChars < 8000), 'the whole built-in tool inventory is never sent');
-  assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 28_000, 'the extra catalog step still costs less than one old full-tool request');
+  assert.ok(requests.every(q => q.promptChars < 9000), `the fixed direct-shell schema stays compact: ${requests.map(q => q.promptChars).join(', ')}`);
+  assert.ok(requests.every(q => JSON.stringify(JSON.parse(q.raw).tools).length < 4500), 'the whole built-in tool inventory is never sent');
+  assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 33_000, `the four-step request remains bounded with direct shell: ${requests.map(q => q.promptChars).join(', ')}`);
 });
 
 test('the agent is offered exactly these tools: everything useful including web search (no key needed), no scheduler, and the question tool the app can answer', { skip }, async (t) => {

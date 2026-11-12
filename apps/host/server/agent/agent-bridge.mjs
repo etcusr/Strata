@@ -423,14 +423,6 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const cancelled = () => { reporter.clear(); emit({ type: 'done', finishReason: 'aborted', cancelled: true, tokensIn: null, tokensOut: null, usageSource: 'unavailable', durationMs: 0, model: route.name, contextMax: route.contextWindow }); return { cancelled: true }; };
     if (c.cancelStart || !made) return cancelled();
 
-    // A checkpoint from a previous engine load restores the KV state before the Harness sends its next model request.
-    // The engine validates model/version/settings and still compares tokens on the next request; any refusal falls back
-    // to ordinary prompt reading without changing the chat history.
-    if (route.kind === 'local' && !fresh) {
-      reporter.set({ phase: 'starting', code: 'restoring-session', text: 'Checking saved context…' });
-      await snapshots.restore(chatId, sessionId, route);
-    }
-
     // The model and the chat's thinking level (the Reasoning menu) are sent to the Harness when either changed. A level the route does
     // not have (an API model with its own vocabulary) is dropped and the model's own default stands: never an error for the person.
     const level = effortOf(thinking ?? 'Medium');   // the menu's default is Medium
@@ -481,8 +473,6 @@ export function createAgentBridge({ dataDir, componentsDir = null, bundledDir = 
     const turn = {
       sessionId, projector, route, requestId, live: false, lastSeq: -1,
       ended: deferred(), follow: null, snapshot: deferred(), finished: false, prompted: false, stopBeforePrompt: false,
-      saveOnStop: false, skipSnapshot: false, snapshotSaving: false, snapshotSkip: deferred(),
-      showSaveStatus: (code, text) => reporter.set({ phase: 'saving', code, text }),
       abortFromRuntime: reason => finishTurn(reason), finish: failure => finishTurn(failure),
       // Helper agents (subagents) the Harness started for this chat, and the state of the run around them.
       children: new Map(), subagentCalls: new Map(), parentOpen: false, stopping: false, settleTimer: null, mode: appliedMode,
@@ -565,17 +555,6 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       for (const f of extra) emit(f);
       // The answer speed of a turn on this computer is the engine's own (tokens it produced over its decode time, as the Monitor shows it).
       const engine = !failure && route.kind === 'local' ? await engineSpeedOf(route, projector) : null;
-      if (!failure && turn.saveOnStop && !turn.skipSnapshot && activeTurns() === 1) {
-        turn.snapshotSaving = true;
-        turn.showSaveStatus('saving-context', 'Saving context… Press Stop again to skip.');
-        const job = snapshots.save(chatId, sessionId, route, projector.contextTokens, { force: true });
-        const saved = job ? await Promise.race([job, turn.snapshotSkip.promise]) : false;
-        turn.snapshotSaving = false;
-        if (turn.skipSnapshot) snapshots.cancel(chatId);
-        emit({ type: 'context-snapshot', state: turn.skipSnapshot ? 'skipped' : saved ? 'saved' : 'unavailable' });
-      } else if (turn.saveOnStop && turn.skipSnapshot) {
-        emit({ type: 'context-snapshot', state: 'skipped' });
-      }
       const frames = failure ? [{ type: 'error', message: plainAgentFailure(failure), details: failure, code: 'AGENT_STOPPED' }] : projector.finish({ model: route.name, contextMax: route.contextWindow, engine });
       reporter.clear();
       for (const f of frames.slice(0, -1)) emit(f);
@@ -590,8 +569,6 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
       c.last = { requestId, sessionId, mode: appliedMode, model: route.name, contextMax: route.contextWindow, remoteModel: route.kind === 'api', content: hideDeltas ? '' : written.all.slice(0, 4_000_000), reasoning: written.reasoning, cards: [...projector.tools.values()].filter(t => t.card).map(t => t.card), terminal };
       turn.ended.resolve({ reason: projector.ended, failure: failure ?? null });
       notifyIdle();
-      if (!failure && !noteReason && !cutEnd && !turn.stopping && !turn.forgetOnEnd && route.kind === 'local' && activeTurns() === 0)
-        void snapshots.save(chatId, sessionId, route, projector.contextTokens);
       // A turn that filled the context, or that the guard stopped, leaves a long history behind: summarise the older part now so the next message has room.
       if (noteReason === 'context' || noteReason === 'searches' || noteReason === 'searches-failed' || noteReason === 'rewrites' || /context window|too long|exceeds/i.test(String(projector.ended?.error?.message ?? ''))) void compactSession(runtime, sessionId, { route, reason: noteReason, error: projector.ended?.error, forgotten: turn.forgetOnEnd });
       if (turn.forgetOnEnd) forget(chatId);
@@ -877,15 +854,14 @@ ${note.text}`, key: note.key, values: note.values, noteReason: 'cut' });
             }
             turn.guard ??= 'empty';
           }
-          if (projector.ended?.kind === 'max-tokens' && !turn.goalRun && !turn.stopping && (turn.cuts ?? 0) < MAX_CUT_RETRIES) {
-            const cut = projector.cut();
+          const cut = projector.ended?.kind === 'max-tokens' ? projector.cut() : null;
+          // A large-window local model that stops after only a few thousand tokens with no
+          // tool draft is usually looping in reasoning. One retry is enough to test recovery.
+          const retryLimit = cut && route.kind === 'local' && route.contextWindow >= 32768
+            && !cut.calls.length && cut.tokens < 4096 ? 1 : MAX_CUT_RETRIES;
+          if (cut && !turn.goalRun && !turn.stopping && (turn.cuts ?? 0) < retryLimit) {
             turn.cuts = (turn.cuts ?? 0) + 1;
-            const note = cutNotice({ ...cut, retrying: true });
-            emit({ type: 'delta', own: true, text: `
-
-${note.text}
-
-`, key: note.key, values: note.values, noteReason: 'cut' });
+            reporter.set({ phase: 'waiting', code: 'retrying-cut', text: 'Retrying interrupted reply…' });
             for (const f of projector.clearCut()) emit(f);
             turn.cutWaiting = true;
             turn.cutRecovery = { started: false, answered: false };
@@ -1526,18 +1502,11 @@ ${note.text}
     } catch (e) { log(`agent · compact after a stopped turn failed: ${e.message}`); }
   }
 
-  async function stop(chatId, { waitMs = 20_000, saveOnStop = false } = {}) {
+  async function stop(chatId, { waitMs = 20_000 } = {}) {
     const c = chats.get(chatId);
     const turn = c?.turn;
     if (!turn && c?.starting) { c.cancelStart = true; return { stopped: true, ended: 'cancelled-before-start', ms: 0 }; }
     if (!turn || !rt) return { stopped: false, reason: 'no active turn' };
-    if (turn.stopping && turn.saveOnStop && saveOnStop) {
-      turn.skipSnapshot = true;
-      snapshots.cancel(chatId);
-      turn.snapshotSkip.resolve(false);
-      turn.showSaveStatus('skipping-context', 'Skipping context save…');
-      return { stopped: true, skipped: true };
-    }
     const t0 = Date.now();
     if (!turn.prompted) {
       // The Harness has not been given the prompt yet, so there is nothing to cancel there.
@@ -1546,8 +1515,6 @@ ${note.text}
       if (early) return { stopped: true, ended: early.reason?.kind ?? 'aborted', ms: Date.now() - t0 };
     }
     turn.stopping = true;
-    turn.saveOnStop = saveOnStop && turn.prompted && turn.route.kind === 'local' && snapshots.supported(turn.route) && activeTurns() === 1;
-    if (turn.saveOnStop) turn.showSaveStatus('stopping-to-save', 'Stopping the answer, then saving context… Press Stop again to skip.');
     const cancelWork = async () => {
       await pauseGoal(rt, turn.sessionId, chatId);
       // Helpers first: a helper still working would otherwise report back and wake the parent again.
@@ -1556,10 +1523,6 @@ ${note.text}
       // Nothing is running in the parent (it was waiting for its helpers): the run ends once they are all down.
       if (!turn.parentOpen) { clearTimeout(turn.settleTimer); turn.settleTimer = after(300, () => { if (!turn.finished && !turn.parentOpen && [...turn.children.values()].every(h => h.done)) turn.finish(null); }); }
     };
-    if (turn.saveOnStop) {
-      void cancelWork().catch(e => turn.finish(`Could not stop the agent: ${e.message}`));
-      return { stopped: true, saving: true, ms: Date.now() - t0 };
-    }
     await cancelWork();
     let timer; const result = await Promise.race([turn.ended.promise, new Promise(r => { timer = after(waitMs, () => r(null)); })]);
     clearTimeout(timer);
@@ -1619,9 +1582,6 @@ ${note.text}
     const turn = chats.get(chatId)?.turn;
     if (turn) {
       turn.forgetOnEnd = true;
-      turn.saveOnStop = false;
-      turn.skipSnapshot = true;
-      turn.snapshotSkip.resolve(false);
       snapshots.forget(chatId);
       return;
     }

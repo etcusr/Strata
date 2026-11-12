@@ -3,8 +3,10 @@
  *
  * The Harness still owns and executes every enabled tool (and its permission
  * checks). The catalog returns schemas in a late tool result, and the model
- * invokes them through one stable dispatcher. Changing the request's tool
- * list would invalidate the engine's cached prompt prefix on a long chat.
+ * invokes uncommon tools through one stable dispatcher. The shell remains
+ * directly visible because the nested argument format often fails in local
+ * models. Changing the request's tool list between steps would invalidate
+ * the engine's cached prompt prefix on a long chat.
  */
 export const name = 'strata-on-demand-tools';
 export const inject = ['tools', 'llm'];
@@ -38,7 +40,9 @@ export function visibleTools(_sessionId, tools) {
   if (!Array.isArray(tools)) return tools;
   // Stable on every step: activating a category must not rewrite the first
   // tokens of a prompt whose KV cache is already warm.
-  return tools.filter(tool => tool.name === CATALOG || tool.name === DISPATCH || tool.name === 'job_list');
+  // Shell is a frequent primitive. Keeping its real schema visible avoids the
+  // nested dispatcher argument that small local models repeatedly truncate.
+  return tools.filter(tool => [CATALOG, DISPATCH, 'job_list', 'bash', 'pwsh'].includes(tool.name));
 }
 
 export function filteredHeader(sessionId, header) {
@@ -87,7 +91,7 @@ export function apply(ctx, config = {}) {
   wrapFetch();
   ctx.tools.register({
     name: CATALOG,
-    description: 'Find tools only when needed. Choose groups: files, shell, jobs, web, browser, devtools, skills, helpers, goals, questions, todo, present, connected, or all. If a group is large, call again with names to get full argument schemas. Then call tool_dispatch. A simple reply needs no tool call.',
+    description: 'Find tools only when needed. Shell commands use bash or pwsh directly. For other tools choose groups: files, shell, jobs, web, browser, devtools, skills, helpers, goals, questions, todo, present, connected, or all. Ask for names to see full schemas, then call tool_dispatch with an object in arguments. A simple reply needs no tool call.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       groups: { type: 'array', minItems: 1, items: { type: 'string', enum: [...CATEGORIES, 'all'] } },
       names: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string' }, description: 'Exact tool names whose full argument schemas are needed.' },
@@ -99,13 +103,14 @@ export function apply(ctx, config = {}) {
       if (Array.isArray(args?.names) && args.names.length) {
         const schemas = available.filter(tool => args.names.includes(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }));
         if (!schemas.length) return 'No enabled tool with those names.';
-        const detail = `Call tool_dispatch with one of these tools: ${JSON.stringify(schemas)}`;
+        const detail = `Call bash or pwsh directly for shell commands. For other tools, call tool_dispatch with arguments as an object: ${JSON.stringify(schemas)}`;
         if (detail.length <= 7000) return detail;
         if (schemas.length > 1) return 'Those schemas are too large together. Call tool_catalog with one name at a time.';
         const tool = schemas[0];
         const fields = Object.fromEntries(Object.entries(tool.parameters?.properties ?? {}).map(([key, value]) =>
           [key, { type: value.type, description: value.description?.slice(0, 140), enum: value.enum, required: value.required }]));
-        return `Call tool_dispatch with ${tool.name}. Its required fields are ${JSON.stringify(tool.parameters?.required ?? [])}; argument fields: ${JSON.stringify(fields).slice(0, 6200)}.`;
+        const instruction = ['bash', 'pwsh'].includes(tool.name) ? `Call ${tool.name} directly` : `Call tool_dispatch with ${tool.name} and an object in arguments`;
+        return `${instruction}. Its required fields are ${JSON.stringify(tool.parameters?.required ?? [])}; argument fields: ${JSON.stringify(fields).slice(0, 6200)}.`;
       }
       if (!chosen.length) return 'Choose a group from the tool_catalog description.';
       const availableGroups = new Set(available.map(tool => category(tool.name)));
@@ -116,16 +121,16 @@ export function apply(ctx, config = {}) {
       const ssh = loaded.includes('shell') || loaded.includes('all')
         ? ' For SSH, use noninteractive authentication (BatchMode=yes), a short ConnectTimeout and one connection attempt. Give long remote commands a bounded timeout or run them as a background job. After Permission denied (publickey), stop retrying the same credentials and diagnose the key or agent once.'
         : '';
-      const detailed = `Call tool_dispatch with the exact tool name and arguments from these schemas: ${JSON.stringify(schemas)}${ssh}`;
+      const detailed = `Call bash or pwsh directly for shell commands. For other tools, call tool_dispatch with the exact tool name and an object in arguments: ${JSON.stringify(schemas)}${ssh}`;
       if (detailed.length <= 7000) return detailed;
       const brief = schemas.map(({ name, description, parameters }) => ({ name, description: description?.slice(0, 130), required: parameters?.required, arguments: Object.keys(parameters?.properties ?? {}) }));
-      const summary = `Available tools: ${JSON.stringify(brief)}. Call tool_catalog with names to get the full schema before tool_dispatch.${ssh}`;
+      const summary = `Available tools: ${JSON.stringify(brief)}. Call bash or pwsh directly for shell commands. For other tools, call tool_catalog with names to get the full schema before tool_dispatch.${ssh}`;
       return summary.length <= 7000 ? summary : `Available tool names: ${schemas.map(tool => tool.name).join(', ')}. Call tool_catalog with names for the schema of the one you need.${ssh}`;
     },
   });
   ctx.tools.register({
     name: DISPATCH,
-    description: 'Run one enabled tool by its exact name. Use tool_catalog first if you need its argument schema. The named tool still runs through its normal permissions and safety checks.',
+    description: 'Run one enabled non-shell tool by its exact name. Use bash or pwsh directly for commands. Use tool_catalog first for other schemas. The arguments field must be an object, never a JSON string. The named tool keeps its normal permissions.',
     parameters: { type: 'object', additionalProperties: false, required: ['name', 'arguments'], properties: {
       name: { type: 'string' }, arguments: { type: 'object' },
     } },

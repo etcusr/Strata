@@ -32,5 +32,11 @@
  "gh31": "Cambiar moneda",
  "gh32": "Automática ({0})",
  "gh33": "Moneda",
- "gh34": "menos de {0}"
+ "gh34": "menos de {0}",
+ "gh35": "Potencia de CPU",
+ "gh36": "Potencia del sistema",
+ "gh37": "Carga y memoria",
+ "gh38": "Potencia y energía",
+ "gh39": "Energía de GPU desde el inicio",
+ "gh40": "Coste de GPU desde el inicio"
 }

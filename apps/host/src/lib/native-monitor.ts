@@ -55,8 +55,8 @@ export function withHostSensors(live:MonitorState,host:MonitorState|null):Monito
  const pick=<T,>(a:T,b:T)=>hasReading(a as unknown)?a:b;
  return {...live,hardware:{...h,
   // The fan and the clock are the host's own readings; the engine's metrics do not carry them (#3628).
-  gpus:(h.gpus??[]).map(g=>{const sensor=s.gpus?.find(x=>x.id===g.id);const own=sensor&&empty(g)?{...g,...sensor}:g;return sensor?{...own,fanPct:own.fanPct??sensor.fanPct,clockMhz:own.clockMhz??sensor.clockMhz}:own;}),
-  cpuTempC:s.cpuTempC,ssdTempC:s.ssdTempC,energyWh:s.energyWh,
+  gpus:(h.gpus??[]).map(g=>{const sensor=s.gpus?.find(x=>x.id===g.id);const own=sensor&&empty(g)?{...g,...sensor}:g;return sensor?{...own,temperatureC:own.temperatureC??sensor.temperatureC,powerW:own.powerW??sensor.powerW,fanPct:own.fanPct??sensor.fanPct,clockMhz:own.clockMhz??sensor.clockMhz,source:hasReading(own.temperatureC)||hasReading(own.powerW)?own.source:hasReading(sensor.temperatureC)||hasReading(sensor.powerW)?sensor.source:own.source}:own;}),
+  cpuTempC:s.cpuTempC,cpuPowerW:s.cpuPowerW,systemPowerW:s.systemPowerW,ssdTempC:s.ssdTempC,energyWh:s.energyWh,
   gpuLoad:pick(h.gpuLoad,s.gpuLoad),vramUsedGb:pick(h.vramUsedGb,s.vramUsedGb),vramTotalGb:pick(h.vramTotalGb,s.vramTotalGb),gpuTempC:pick(h.gpuTempC,s.gpuTempC),
   powerW:pick(h.powerW,s.powerW),powerLimitW:pick(h.powerLimitW,s.powerLimitW),pcieRxMbs:pick(h.pcieRxMbs,s.pcieRxMbs)}};
 }

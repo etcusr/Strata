@@ -30,21 +30,25 @@ function ReadingBar({ label, value, tone = 'accent' }: {
 }) {
     return hasReading(value) ? <Bar label={tr(label)} value={value} tone={tone}/> : <div className="st-progress" role="img" aria-label={tr("{0}: unavailable", [label])}/>;
 }
-function MonitorMetric({ label, icon, value, unit, sub, chart, source, secondary }: {
+function MonitorGroup({ label, icon, children }: { label: string; icon: IconName; children: ReactNode }) {
+    return <section className="st-card monitor-group" aria-label={tr(label)}>
+        <h2 className="monitor-group__title h4"><Icon name={icon} size={17}/>{tr(label)}</h2>
+        <div className="monitor-group__rows">{children}</div>
+    </section>;
+}
+function MonitorMetric({ label, value, unit, sub, chart, source }: {
     label: string;
-    icon: IconName;
     value: ReactNode;
     unit?: string;
-    sub: ReactNode;
-    chart: ReactNode;
+    sub?: ReactNode;
+    chart?: ReactNode;
     source: string;
-    secondary?: ReactNode;
 }) {
-    return <section className="st-card monitor-metric" aria-label={tr(label)}>
-    <div className="st-metric__label"><Icon name={icon} size={18}/>{tr(label)}<span className="monitor-metric__source xs">{tr(source)}</span></div>
-    <div className={secondary ? 'monitor-speed-values' : 'monitor-metric__reading'}><div><div className="st-metric__value">{tr(value)}{tr(unit ? <span className="st-metric__unit">{tr(unit)}</span> : null)}</div><div className="monitor-metric__sub xs muted">{tr(sub)}</div></div>{tr(secondary)}</div>
-    {tr(chart)}
-  </section>;
+    return <div className="monitor-metric" role="group" aria-label={tr(label)} title={typeof sub === 'string' ? tr(sub) : undefined}>
+        <div className="monitor-metric__name"><span>{tr(label)}</span><span className="monitor-metric__source xs">{tr(source)}</span></div>
+        <div className="monitor-metric__reading num"><span className="monitor-metric__number">{tr(value)}</span>{tr(unit ? <span className="st-metric__unit">{tr(unit)}</span> : null)}</div>
+        {tr(chart ? <div className="monitor-metric__chart">{chart}</div> : null)}
+    </div>;
 }
 function requestStatus(request: ServeRequest) {
     if (request.state === 'error')
@@ -147,17 +151,7 @@ function LegacyMonitorScreen({ native }: {
     const cacheKnown = ['engine', 'demo'].includes(data.expertCache.source ?? '');
     const cacheMemory = cacheKnown ? data.expertCache.memoryGb : null;
     const cachePercent = hasReading(cacheMemory) ? percent(cacheMemory, gpuCapacity(defaultDevices)) : cacheKnown ? percent(data.expertCache.used, data.expertCache.total) : null;
-    const ramPct = percent(data.hardware.ramUsedGb, data.hardware.ramTotalGb);
-    // The readings strip under the cards: what the GPU used and cost since Strata started, the fan and clock, and the temperatures this PC can give.
     const energyWh = data.hardware.energyWh, fan = gpuValue('fanPct', 'max'), clock = gpuValue('clockMhz', 'max');
-    const readingsStrip = [
-        hasReading(energyWh) ? { label: 'Energy since start', value: energyWh >= 1000 ? `${number(energyWh / 1000, 2)} kWh` : `${number(energyWh, 1)} Wh` } : null,
-        hasReading(energyWh) && electricityPrice > 0 ? { label: 'Cost since start', value: money.format(energyWh / 1000 * electricityPrice) } : null,
-        hasReading(fan) ? { label: 'GPU fan', value: `${number(fan)} %` } : null,
-        hasReading(clock) ? { label: 'GPU clock', value: `${number(clock)} MHz` } : null,
-        hasReading(data.hardware.cpuTempC) ? { label: 'CPU temperature', value: `${number(data.hardware.cpuTempC)} °C` } : null,
-        hasReading(data.hardware.ssdTempC) ? { label: 'SSD temperature', value: `${number(data.hardware.ssdTempC)} °C` } : null,
-    ].filter((line): line is { label: string; value: string } => line !== null);
     const history = data.history, timestamps = history.map(s => s.t);
     const historyGpu = (key: Parameters<typeof gpuMetric>[2], fallback: 'gpuLoad' | 'vramUsedGb' | 'gpuTempC' | 'powerW' | 'pcieRxMbs', mode: Parameters<typeof gpuMetric>[3] = 'sum') => history.map(sample => sample.gpus ? gpuMetric(selectedGpus, sample.gpus, key, mode) : (sample.gpuIds ? selectedGpus.length === sample.gpuIds.length && selectedGpus.every(gpu => sample.gpuIds!.includes(gpuId(gpu))) : gpuChoice === 'all') ? sample[fallback] : null);
     const historyCpu = history.map(sample => cpuChoice === 'all' ? sample.cpuLoad : sample.cpus?.find(p => p.id === cpuChoice)?.utilizationPct);
@@ -186,22 +180,37 @@ function LegacyMonitorScreen({ native }: {
       <div className="monitor-state__reading small"><span>{tr(multipleScope ? `${number(data.queue.running)} active · ${number(data.queue.waiting)} queued` : data.phase === 'idle' ? 'Waiting for a request' : data.phaseLabel)}</span><span className="muted num">{tr(statusDetail)}</span></div>
       {tr(!multipleScope ? <Bar label={tr("Model progress")} value={progress ?? 0} indeterminate={writing && !hasReading(progress)} tone={data.phase === 'reading' ? 'info' : 'accent'}/> : null)}
     </section>
-    <div className="monitor-metrics">
-      {tr(!multipleScope ? <MonitorMetric label={tr("Speed")} icon="gauge" value={number(decode, 1)} unit={hasReading(decode) ? 'tok/s' : ''} source={throughput} sub={writing ? 'Decode now' : last ? 'Decode last request' : 'Decode'} secondary={<div><div className="st-metric__value">{tr(number(prefill))}{tr(hasReading(prefill) ? <span className="st-metric__unit">{tr("tok/s")}</span> : null)}</div><div className="monitor-metric__sub xs muted">{tr(data.phase === 'reading' ? 'Prefill now' : writing ? 'Prefill this request' : last ? 'Prefill last request' : 'Prefill')}</div></div>} chart={<ReferenceSpark label={tr("Speed")} data={history.map(s => throughputKnown ? s.outputTps : null)} secondary={{ data: history.map(s => throughputKnown ? s.promptTps : null), label: 'Prefill', tone: 'var(--st-chart-prefill)' }} tone="var(--st-chart-decode)" unit="tok/s" timestamps={timestamps}/>}/> : null)}
-      <MonitorMetric label={tr("GPU load")} icon="gpu" value={number(gpuLoad)} unit={hasReading(gpuLoad) ? '%' : ''} source={gpuSource('utilizationPct', 'mean')} sub={whose('utilizationPct', 'mean') ?? gpuName} chart={chart('GPU load', historyGpu('utilizationPct', 'gpuLoad', 'mean'), '%', 100)}/>
-      <MonitorMetric label={tr(shared ? 'Shared GPU memory' : 'VRAM')} icon="layers" value={number(vram, 1)} unit={hasReading(vram) ? vramTotal ? `/ ${number(vramTotal, 0)} GB` : 'GB' : ''} source={gpuSource('memoryUsedGb')} sub={whose('memoryUsedGb') ?? (shared ? 'Same memory pool as system RAM' : multipleGpus ? 'Total across selected GPUs' : cacheKnown && devices.length === 1 ? `${number(data.expertCache.used)} experts cached` : 'GPU memory')} chart={chart(shared ? 'Shared GPU memory' : 'VRAM', historyGpu('memoryUsedGb', 'vramUsedGb'), 'GB', vramTotal)}/>
-      <MonitorMetric label={tr("GPU temp")} icon="thermometer" value={number(temperature)} unit={hasReading(temperature) ? '°C' : ''} source={gpuSource('temperatureC', 'max')} sub={whose('temperatureC', 'max') ?? (multipleGpus ? 'Hottest selected GPU' : selectedGpus[0]?.name ?? (selectedInstance && !selectedInstance.gpuIds.length ? native ? 'Automatic GPU placement' : 'CPU only · no GPU assigned' : 'No GPU detected'))} chart={chart('GPU temperature', historyGpu('temperatureC', 'gpuTempC', 'max'), '°C', 90, 'var(--st-warn)')}/>
-      <MonitorMetric label={tr("Power")} icon="bolt" value={number(power)} unit={hasReading(power) ? 'W' : ''} source={gpuSource('powerW')} sub={whose('powerW') ?? (hasReading(powerLimit) ? `of ${number(powerLimit)} W limit` : multipleGpus ? 'Total across selected GPUs' : 'GPU power draw')} chart={chart('GPU power', historyGpu('powerW', 'powerW'), 'W', powerLimit ?? undefined)}/>
-      <MonitorMetric label={tr("PCIe")} icon="link" value={hasReading(gen) ? `Gen${gen}` : multipleGpus ? number(pcieRx, 1) : '—'} unit={hasReading(gen) && hasReading(width) ? `x${width}` : multipleGpus && hasReading(pcieRx) ? 'MB/s' : ''} source={hasReading(gen) ? sourceLabel(singleReading?.source) : gpuSource('pcieRxMbs')} sub={hasReading(pcieRx) ? `To GPU ${number(pcieRx, 1)} MB/s${whose('pcieRxMbs') ? ` · ${whose('pcieRxMbs')}` : ''}${hasReading(gen) && hasReading(singleReading?.pcieGen) && singleReading.pcieGen < gen ? ` · idle Gen${singleReading.pcieGen}` : ''}` : shared ? 'Shared memory · no PCIe link' : multipleGpus ? 'Total transfer to selected GPUs' : 'Transfer to GPU unavailable'} chart={chart('PCIe transfer', historyGpu('pcieRxMbs', 'pcieRxMbs'), 'MB/s', undefined, 'var(--st-info)')}/>
-      <MonitorMetric label={tr("CPU")} icon="cpu" value={number(cpu)} unit={hasReading(cpu) ? '%' : ''} source={hasReading(cpu) ? 'Measured' : 'Unavailable'} sub={cpuName} chart={chart('CPU utilization', historyCpu, '%', 100)}/>
-      <MonitorMetric label={tr("Disk read")} icon="disk" value={number(hasReading(data.hardware.diskReadGbs) ? data.hardware.diskReadGbs >= 1 ? data.hardware.diskReadGbs : data.hardware.diskReadGbs * 1024 : null, 1)} unit={hasReading(data.hardware.diskReadGbs) ? data.hardware.diskReadGbs >= 1 ? 'GB/s' : 'MB/s' : ''} source={hasReading(data.hardware.diskReadGbs) ? 'Measured' : 'Unavailable'} sub={hasReading(data.hardware.diskWriteMbs) ? `Write ${number(data.hardware.diskWriteMbs, 1)} MB/s` : 'Read throughput'} chart={chart('Disk read', history.map(s => hasReading(s.diskReadGbs) ? s.diskReadGbs * 1024 : null), 'MB/s', undefined, 'var(--st-info)')}/>
+    <div className="monitor-groups">
+      <MonitorGroup label="Performance" icon="gauge">
+        {tr(!multipleScope ? <MonitorMetric label="Decode" value={number(decode, 1)} unit={hasReading(decode) ? 'tok/s' : ''} source={throughput} sub={writing ? 'Decode now' : last ? 'Decode last request' : 'Decode'} chart={chart('Speed', history.map(s => throughputKnown ? s.outputTps : null), 'tok/s', undefined, 'var(--st-chart-decode)')}/> : null)}
+        {tr(!multipleScope ? <MonitorMetric label="Prefill" value={number(prefill)} unit={hasReading(prefill) ? 'tok/s' : ''} source={throughput} sub={data.phase === 'reading' ? 'Prefill now' : writing ? 'Prefill this request' : last ? 'Prefill last request' : 'Prefill'} chart={chart('Prefill', history.map(s => throughputKnown ? s.promptTps : null), 'tok/s', undefined, 'var(--st-chart-prefill)')}/> : null)}
+        <MonitorMetric label="Disk read" value={number(hasReading(data.hardware.diskReadGbs) ? data.hardware.diskReadGbs >= 1 ? data.hardware.diskReadGbs : data.hardware.diskReadGbs * 1024 : null, 1)} unit={hasReading(data.hardware.diskReadGbs) ? data.hardware.diskReadGbs >= 1 ? 'GB/s' : 'MB/s' : ''} source={hasReading(data.hardware.diskReadGbs) ? 'Measured' : 'Unavailable'} sub={hasReading(data.hardware.diskWriteMbs) ? `Write ${number(data.hardware.diskWriteMbs, 1)} MB/s` : 'Read throughput'} chart={chart('Disk read', history.map(s => hasReading(s.diskReadGbs) ? s.diskReadGbs * 1024 : null), 'MB/s', undefined, 'var(--st-info)')}/>
+        {tr(hasReading(clock) ? <MonitorMetric label="GPU clock" value={number(clock)} unit="MHz" source={gpuSource('clockMhz', 'max')}/> : null)}
+      </MonitorGroup>
+      <MonitorGroup label="Load and memory" icon="gpu">
+        <MonitorMetric label="GPU load" value={number(gpuLoad)} unit={hasReading(gpuLoad) ? '%' : ''} source={gpuSource('utilizationPct', 'mean')} sub={whose('utilizationPct', 'mean') ?? gpuName} chart={chart('GPU load', historyGpu('utilizationPct', 'gpuLoad', 'mean'), '%', 100)}/>
+        <MonitorMetric label="CPU" value={number(cpu)} unit={hasReading(cpu) ? '%' : ''} source={hasReading(cpu) ? 'Measured' : 'Unavailable'} sub={cpuName} chart={chart('CPU utilization', historyCpu, '%', 100)}/>
+        <MonitorMetric label={shared ? 'Shared GPU memory' : 'VRAM'} value={number(vram, 1)} unit={hasReading(vram) ? vramTotal ? `/ ${number(vramTotal, 0)} GB` : 'GB' : ''} source={gpuSource('memoryUsedGb')} sub={shared ? 'Same memory pool as system RAM' : 'GPU memory'} chart={chart(shared ? 'Shared GPU memory' : 'VRAM', historyGpu('memoryUsedGb', 'vramUsedGb'), 'GB', vramTotal)}/>
+        <MonitorMetric label="System RAM" value={number(data.hardware.ramUsedGb, 1)} unit={hasReading(data.hardware.ramUsedGb) ? `/ ${number(data.hardware.ramTotalGb)} GB` : ''} source={hasReading(data.hardware.ramUsedGb) ? 'Measured' : 'Unavailable'} chart={chart('System RAM', history.map(s => s.ramUsedGb), 'GB', data.hardware.ramTotalGb)}/>
+        {tr(!shared && (hasReading(gen) || hasReading(pcieRx)) ? <MonitorMetric label="PCIe" value={hasReading(gen) ? `Gen${gen}` : number(pcieRx, 1)} unit={hasReading(gen) && hasReading(width) ? `x${width}` : 'MB/s'} source={hasReading(gen) ? sourceLabel(singleReading?.source) : gpuSource('pcieRxMbs')} sub={hasReading(pcieRx) ? `To GPU ${number(pcieRx, 1)} MB/s` : 'Transfer to GPU'} chart={chart('PCIe transfer', historyGpu('pcieRxMbs', 'pcieRxMbs'), 'MB/s', undefined, 'var(--st-info)')}/> : null)}
+      </MonitorGroup>
+      <MonitorGroup label="Temperature" icon="thermometer">
+        <MonitorMetric label="GPU temp" value={number(temperature)} unit={hasReading(temperature) ? '°C' : ''} source={gpuSource('temperatureC', 'max')} sub={whose('temperatureC', 'max') ?? gpuName} chart={chart('GPU temperature', historyGpu('temperatureC', 'gpuTempC', 'max'), '°C', 90, 'var(--st-warn)')}/>
+        <MonitorMetric label="CPU temperature" value={number(data.hardware.cpuTempC)} unit={hasReading(data.hardware.cpuTempC) ? '°C' : ''} source={hasReading(data.hardware.cpuTempC) ? 'Measured' : 'Unavailable'}/>
+        {tr(hasReading(data.hardware.ssdTempC) ? <MonitorMetric label="SSD temperature" value={number(data.hardware.ssdTempC)} unit="°C" source="Measured"/> : null)}
+        {tr(hasReading(fan) ? <MonitorMetric label="GPU fan" value={number(fan)} unit="%" source={gpuSource('fanPct', 'max')}/> : null)}
+      </MonitorGroup>
+      <MonitorGroup label="Power and energy" icon="bolt">
+        {tr(hasReading(data.hardware.systemPowerW) ? <MonitorMetric label="System power" value={number(data.hardware.systemPowerW, 1)} unit="W" source="Measured"/> : null)}
+        <MonitorMetric label="GPU power" value={number(power, 1)} unit={hasReading(power) ? 'W' : ''} source={gpuSource('powerW')} sub={whose('powerW') ?? (hasReading(powerLimit) ? `of ${number(powerLimit)} W limit` : 'GPU power draw')} chart={chart('GPU power', historyGpu('powerW', 'powerW'), 'W', powerLimit ?? undefined)}/>
+        {tr(hasReading(data.hardware.cpuPowerW) ? <MonitorMetric label="CPU power" value={number(data.hardware.cpuPowerW, 1)} unit="W" source="Measured"/> : null)}
+        {tr(hasReading(energyWh) && hasReading(power) ? <MonitorMetric label="GPU energy since start" value={energyWh >= 1000 ? number(energyWh / 1000, 2) : number(energyWh, 1)} unit={energyWh >= 1000 ? 'kWh' : 'Wh'} source={gpuSource('powerW')}/> : null)}
+        {tr(hasReading(energyWh) && hasReading(power) && electricityPrice > 0 ? <MonitorMetric label="GPU cost since start" value={money.format(energyWh / 1000 * electricityPrice)} source={gpuSource('powerW')}/> : null)}
+      </MonitorGroup>
     </div>
-    {tr(readingsStrip.length ? <section className="st-card monitor-readings" aria-label={tr("Energy and temperature readings")}><dl>{readingsStrip.map(item => <div key={item.label}><dt>{tr(item.label)}</dt><dd className="num">{item.value}</dd></div>)}</dl></section> : null)}
     <div className="monitor-context-requests">
       <section className="st-card monitor-context"><h2 className="h4">{tr("Context fill")}</h2><div className="monitor-context__gauge"><Gauge value={contextPct ?? 0} label={tr(hasReading(contextPct) ? `${Math.round(contextPct)}%` : '—')} sub={contextKnown ? `${tokens(contextUsed)} / ${contextLabel(data.context.maxTokens)}` : selection === 'all' && (runtime?.instances.length ?? 0) > 1 ? 'Select a model to see context' : 'No recorded request usage'}/></div>
         <div className="monitor-bar-reading"><span>{tr("Experts in VRAM")}</span><span className="muted num">{tr(cacheKnown ? `${number(data.expertCache.used)}${hasReading(cacheMemory) ? ` · ${number(cacheMemory, 1)} GB` : ''}` : '—')}</span></div><ReadingBar label={tr("Experts in VRAM")} value={cachePercent}/>
-        <div className="monitor-bar-reading"><span>{tr("System RAM")}</span><span className="muted num">{tr(hasReading(data.hardware.ramUsedGb) ? `${number(data.hardware.ramUsedGb, 1)} / ${number(data.hardware.ramTotalGb)} GB` : '—')}</span></div><ReadingBar label={tr("System RAM")} value={ramPct} tone={hasReading(ramPct) && ramPct > 92 ? 'danger' : 'accent'}/>
-        <div className="monitor-bar-reading"><span>{tr("GPU temperature")}</span><span className="muted num">{tr(number(temperature))}{tr(hasReading(temperature) ? ' °C' : '')}</span></div><ReadingBar label={tr("GPU temperature")} value={temperature} tone="warn"/>
       </section>
       <section className="st-card monitor-requests"><div className="section-toolbar"><h2 className="h4">{tr("Recent requests")}</h2>{tr(requests.length > 12 ? <Btn size="sm" onClick={() => setShowAll(!showAll)}>{tr(showAll ? 'Show fewer' : `Show all (${requests.length})`)}</Btn> : null)}</div>
         <div className="st-tablewrap monitor-request-table" data-expanded={showAll}><table className="st-table"><thead><tr><th>{tr("Time")}</th><th>{tr("Status")}</th>{tr(multipleModels ? <th>{tr("Model")}</th> : null)}<th className="num">{tr("Prompt")}</th><th className="num">{tr("Reused")}</th><th className="num">{tr("Output")}</th><th className="num">{tr("Tok/s")}</th><th className="num" title={tr("Experts already in GPU memory; PCIe share is shown separately when reported.")}>{tr("VRAM hit rate")}</th><th className="num">{tr("Duration")}</th></tr></thead><tbody>{tr(visibleRequests.length ? visibleRequests.map(r => <tr key={r.id}><td>{tr(new Date(r.at).toLocaleTimeString(localeTag(), { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</td><td><span className="request-status" data-state={r.state}>{tr(requestStatus(r))}</span>{tr(r.usageSource === 'demo' ? <span className="monitor-request-source xs muted">{tr("Illustrative")}</span> : null)}</td>{tr(multipleModels ? <td><span className="xs">{tr(r.model)}</span></td> : null)}<td className="num">{tr(number(r.tokensIn))}</td><td className="num">{tr(number(r.cachedTokens))}</td><td className="num">{tr(number(r.tokensOut))}</td><td className="num">{tr(number(r.tps, 1))}</td><td className="num">{tr(hasReading(r.hitRate) ? `${number(r.hitRate * 100, 1)}%` : '—')}{tr(hasReading(r.pcieShare) && r.pcieShare > 0 ? <span className="xs muted"> +{tr(number(r.pcieShare * 100, 1))}{tr("% PCIe")}</span> : null)}</td><td className="num">{tr(r.durationMs ? duration(r.durationMs) : '—')}</td></tr>) : <tr><td colSpan={multipleModels ? 9 : 8} className="muted">{tr("No requests yet")}</td></tr>)}</tbody></table></div>

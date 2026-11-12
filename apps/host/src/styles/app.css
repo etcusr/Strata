@@ -7385,10 +7385,6 @@ textarea {
 .native-choice__col .native-resource-choice button > svg, .native-choice__col .native-resource-choice button > span + svg { display: none; }
 .native-choice__col .native-resource-choice button[data-selected="true"] { background: var(--st-surface); color: var(--st-ink); box-shadow: var(--st-sh-card); }
 .native-choice__col .native-resource-choice button:focus-visible { outline: 2px solid var(--st-accent); outline-offset: 1px; }
-.native-performance-ram { max-width: 430px; margin: 8px 0 4px; }
-.native-performance-ram label { display: flex; justify-content: space-between; gap: 12px; font-size: var(--st-fs-sm); }
-.native-performance-ram input { display: block; width: 100%; margin: 8px 0 4px; accent-color: var(--st-accent); }
-.native-performance-ram p { margin: 0; }
 
 /* Context dropdown and the two Computer use buttons share one line, the buttons level with the dropdown (tester report 2026-10-17: they sat
    16px lower, from the 16px top margin of the onboarding version of this control, and touched the separator under the row). They wrap
