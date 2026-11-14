@@ -108,7 +108,11 @@ def missing_file(failure: str) -> bool:
 
 
 def capital(text: str) -> str:
-    """A reason that was written to stand alone ("the update feed could not be read: ...") starts the sentence it is joined to with a capital."""
+    """A reason that was written to stand alone ("the update feed could not be read: ...") starts the sentence it is joined to with a capital.
+    A host name stays as it is written ("github.com did not answer ...", strata_control/netpolicy.py)."""
+    first = text.split(" ", 1)[0]
+    if "." in first.strip(".") and re.fullmatch(r"[a-z0-9.-]+", first.rstrip(".")):
+        return text
     return text[:1].upper() + text[1:]
 
 
@@ -1068,8 +1072,9 @@ class Runner:
         try:
             if s.model_path:
                 from strata_control import discovery
-                first = next(iter(sorted(Path(s.model_path).glob("*.gguf"))), None) if Path(s.model_path).is_dir() else Path(s.model_path)
-                found = discovery.prepared_beside(first)["data_dir"] if first else None
+                # the folder above the person's own files only when Strata may keep its files there (writable, not a Hugging Face cache);
+                # else setup's default data folder (lane NET item 5; beside_refused() says so)
+                found = discovery.writable_beside(self._first_own_gguf())
                 return Path(found) if found else None
             if s.family and s.model:
                 path = self.catalog.installed_config(self.catalog.tag_of(s.family, s.model))
@@ -1080,6 +1085,32 @@ class Runner:
                         return found
             found, source = self.catalog.data_dir_choice()
             return found if source != "default" else None
+        except Exception:                                    # noqa: BLE001
+            return None
+
+    def _first_own_gguf(self) -> Path | None:
+        s = self.s
+        if not s.model_path:
+            return None
+        try:
+            p = Path(s.model_path)
+            return next(iter(sorted(p.glob("*.gguf"))), None) if p.is_dir() else p
+        except OSError:
+            return None
+
+    def beside_refused(self) -> Path | None:
+        """The data folder guessed from the person's own files (the folder above a `models` folder) when Strata does not use it for its own files
+        because it cannot write there or it is inside a Hugging Face cache; None when it is used or there is none."""
+        s = self.s
+        if not s.model_path or s.data_dir:
+            return None
+        try:
+            from strata_control import discovery
+            first = self._first_own_gguf()
+            found = discovery.prepared_beside(first)["data_dir"] if first else None
+            if found is None or discovery.writable_beside(first) is not None:
+                return None
+            return Path(found)
         except Exception:                                    # noqa: BLE001
             return None
 
@@ -1197,6 +1228,15 @@ class Runner:
                 return adopted
         self.emit("model", f"Preparing {title} from your model files…" if s.model_path else
                   f"Getting {title} ready (a download may be large; it continues where it stopped if interrupted)…", 0)
+        refused = self.beside_refused()
+        if refused is not None:                              # lane NET item 5 (W9): the files stay, Strata's own go to the data folder
+            from strata_control import discovery
+            why = (f"{refused} is a Hugging Face download folder, so Strata" if discovery.in_hf_cache(refused) or discovery.in_hf_cache(refused / "models")
+                   else f"Strata can't write in {refused}, so it")   # (W9 / W9b, owner 11-10)
+            note = (f"Your model files are used where they are. {why} keeps its own files (the prepared data and "
+                    f"the picture reader) in {cat.data_dir()}.")
+            self.notices.append(note)
+            self.emit("model", note, None)
         argv = [self.python, str(cat.src / "setup.py"), *self.setup_args()]
         env = self._env()
         env.update(STRATA_CONTROL_INSTALL="1", STRATA_INSTALL_DIR=str(cat.root), PYTHONNOUSERSITE="1")
@@ -1216,9 +1256,10 @@ class Runner:
         for line in self._read_lines(p):
             if self.cancel.is_set():
                 self._stop_children()
+                self.keep_setup_output(lines + [f"(you stopped it{': ' + said[0] if said else ''})"])   # the log says where it stood
                 raise Cancelled()
             if line is None:                                 # nothing printed for a while: the long steps (packing, converting) are silent
-                if said and said[1] != "download" and time.monotonic() - quiet_since >= self.HEARTBEAT_S:
+                if said and time.monotonic() - quiet_since >= self.HEARTBEAT_S:     # (the download phase too: a server that does not answer is silent)
                     quiet_since = time.monotonic()
                     self.emit("model", f"{said[0]} (still working, {_elapsed(time.monotonic() - step_since)} so far)", None, step=step_seen)
                 continue
@@ -1239,11 +1280,10 @@ class Runner:
             dl, phase, label = prog.get("download"), prog.get("phase"), prog.get("label")
             if prog.get("step") != step_seen:
                 step_seen, step_since = prog.get("step"), time.monotonic()
-            if label and not dl:
-                said = (label, phase)
-            else:
-                said = None
-            if dl and dl.get("total_gb", 0) >= 0.05 and not (s.model_path and phase == "download"):
+            said = (label, phase) if label else None
+            if phase == "waiting":                           # setup is waiting for a server to answer: say which one (netpolicy's line)
+                self.emit("model", label, None, step=prog.get("step"))
+            elif dl and dl.get("total_gb", 0) >= 0.05 and not (s.model_path and phase == "download"):
                 if phase == "download" and already is None:
                     already = float(dl["percent"]) >= 99.5
                 text = download_text(dl, bool(already) and phase == "download", label)

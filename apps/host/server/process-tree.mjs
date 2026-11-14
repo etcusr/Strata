@@ -28,7 +28,8 @@ export function endTree(child, signal = 'SIGTERM') {
     if (child.pid) {
       try { process.kill(-child.pid, signal); return; } catch { /* no such group: it did not lead one, or it is gone */ }
     }
-    child.kill(signal);
+    // A failed spawn has no pid; signalling it can reach this process group on macOS.
+    if (child.pid) child.kill(signal);
   } catch { /* already gone */ }
 }
 

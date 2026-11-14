@@ -77,3 +77,14 @@ test('a custom command that runs out of time takes the programs it started with 
   rmSync(marker, { force: true });
   assert.ok(await gone(pid), 'the command\'s own child outlived the time limit');
 });
+
+test('ending a child that never started leaves the caller and its process group alone', { skip: isWin && 'POSIX process groups' }, async () => {
+  // Run in a separate group so a regression cannot signal this test runner.
+  const body = `import { spawn } from 'node:child_process'; import { endTree, endTreeThenKill } from ${JSON.stringify(new URL('../server/process-tree.mjs', import.meta.url).href)};
+    const c = spawn('strata-no-such-program-xyz', [], { stdio: 'ignore' }); c.on('error', () => {}); endTree(c); endTreeThenKill(c, 10); setTimeout(() => console.log('survived'), 300);`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', body], { detached: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  let out = ''; child.stdout.on('data', b => { out += b; });
+  const code = await new Promise(resolve => child.on('close', (c, s) => resolve(s ?? c)));
+  assert.equal(code, 0, `the caller was signalled (${code})`);
+  assert.match(out, /survived/);
+});

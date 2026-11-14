@@ -59,6 +59,17 @@ class HostNames(unittest.TestCase):
 
 
 class ListenAddress(unittest.TestCase):
+    def test_bind_does_not_look_up_a_host_name(self):
+        with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("unexpected host lookup")), \
+                mock.patch.object(socket, "gethostbyaddr", side_effect=AssertionError("unexpected host lookup")):
+            with Server(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+                self.assertGreater(server.server_address[1], 0)
+
+    def test_bind_sets_address_and_port(self):
+        with Server(("127.0.0.1", 0), BaseHTTPRequestHandler) as server:
+            self.assertEqual((server.server_name, server.server_port),
+                             ("127.0.0.1", server.server_address[1]))
+
     def test_ipv4_address_family(self):
         with Server(("127.0.0.1", 0), BaseHTTPRequestHandler, bind_and_activate=False) as s:
             self.assertEqual(s.address_family, socket.AF_INET)

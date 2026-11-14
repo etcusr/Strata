@@ -27,5 +27,9 @@ int main() {
                 ++cases;
             }
     assert(strata::core::serve_stop_bound(4, 0, static_cast<const int*>(nullptr), [](int) { return false; }) == 0);
+    assert(strata::core::serve_stop_bound_on(nullptr));
+    assert(strata::core::serve_stop_bound_on("1"));
+    assert(strata::core::serve_stop_bound_on(""));
+    assert(!strata::core::serve_stop_bound_on("0"));
     std::cout << "SUMMARY stop_bound cases=" << cases << " passed\n";
 }

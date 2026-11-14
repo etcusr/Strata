@@ -14,11 +14,11 @@ import { resolvePython, venvPython } from './python-resolver.mjs';
 import os from 'node:os';
 import { markPictures, runtimeVision } from './native-vision.mjs';
 import { dsEngineArgs, dsUserArgs, dsArgsNote, withoutVisionFlag } from './native-ds-args.mjs';
-import { componentsDirectory, installerEnvironment, controlEnvironment, sourceServerEnvironment } from './control-runtime.mjs';
+import { componentsDirectory, installerEnvironment, controlEnvironment, sourceServerEnvironment, UPDATE_LOCK_HELD } from './control-runtime.mjs';
 import { createEngineStep } from './engine-step.mjs';
 import { dataFolderFromPick, isDriveRoot, makeFolder, rememberDataFolder, syncDataFolder, terminalSettingsFile } from './model-folder.mjs';
 import { createAutoTune, writeTuneConfig } from './native-autotune.mjs';
-import { plainError, PHASE_TEXT } from './update-messages.mjs';
+import { plainError, PHASE_TEXT, UPDATE_WAITING_FOR_LOCK } from './update-messages.mjs';
 import { checkAndParseRunConfig, checkRunConfig, describeIssues } from './run-config-check.mjs';
 import { openTextFile } from './open-text-file.mjs';
 import { markEngine, engineRefusal, engineTooOld } from './engine-version.mjs';
@@ -35,7 +35,7 @@ function readJson(path,fallback={}){try{return JSON.parse(readFileSync(path,'utf
 
 /** The plain words for "no usable engine": the model still downloads, but loading needs the engine (owner decision 2026-10-18). */
 export const ENGINE_NOT_RECOGNISED='Strata didn’t recognise an engine for this computer. The model is downloaded, but it can’t run until the right engine is installed. Open Settings → About.';
-export function createNativeControl({directory,requests=()=>[],changed=()=>{},spawnProcess=spawn,fetcher=fetch,modelsDirectory,nativeDataDirectory=value=>value,beforeLoad=async()=>{},hardwareProbe=()=>[],control=null,ready=null,appUpdater=null,defaultRepo=process.env.STRATA_NATIVE_REPO??resolve(ROOT,'../../Strata')}={}){
+export function createNativeControl({directory,requests=()=>[],changed=()=>{},spawnProcess=spawn,fetcher=fetch,modelsDirectory,nativeDataDirectory=value=>value,beforeLoad=async()=>{},hardwareProbe=()=>[],control=null,ready=null,appUpdater=null,lockWaitMs=60000,lockPollMs=2000,defaultRepo=process.env.STRATA_NATIVE_REPO??resolve(ROOT,'../../Strata')}={}){
  mkdirSync(directory,{recursive:true});
  const settingsPath=join(directory,'native-host.json');
  let preferences=readJson(settingsPath,{repo:defaultRepo});
@@ -575,7 +575,20 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
   if(instances.size&&!(job.kind==='update-engine'&&args.stopModel===true))throw new Error('Unload native models before changing engine files.');
   job.abort=new AbortController();
   const subject=job.kind==='update-strata'?'Strata':'engine';
-  try{return await componentSteps(job,subject,args);}catch(error){updateLog(`${job.kind} failed: ${String(error?.message??error).slice(0,400)}`);throw error?.details!==undefined&&error.message?error:plainError(error,subject,args?.firstRun===true?'Continue':undefined);}
+  try{return await withUpdateLock(job,()=>componentSteps(job,subject,args));}catch(error){updateLog(`${job.kind} failed: ${String(error?.message??error).slice(0,400)}`);throw error?.details!==undefined&&error.message?error:plainError(error,subject,args?.firstRun===true?'Continue':undefined);}
+ }
+ async function withUpdateLock(job,run){
+  const until=Date.now()+lockWaitMs;
+  for(;;){
+   try{return await run();}
+   catch(error){
+    const busy=error?.code==='update_busy'||UPDATE_LOCK_HELD.test(String(error?.message??''));
+    if(!busy||Date.now()>=until||job.state!=='running'||job.abort?.signal.aborted)throw error;
+    job.summary=UPDATE_WAITING_FOR_LOCK;emit();
+    await new Promise(resolve=>setTimeout(resolve,lockPollMs));
+    if(job.state!=='running')throw error;
+   }
+  }
  }
  async function componentSteps(job,subject,args={}){
   const onEvent=event=>{
@@ -591,7 +604,7 @@ return {summary:result.summary??'Deleted',removed:result.plan?.gb??null};}
    /* A model is loaded and the person said yes to stopping it (the dialog names it): Control downloads while it serves, stops it cleanly, updates, and leaves it stopped.
       Whatever the result, the models it stopped are kept so the app offers to start them again, on the new engine or, after a failed update, on the old one. */
    const gate=args.stopModel===true&&instances.size?updateGate(job):null;
-   try{const done=await control.update({engine:true,control:false,stopModel:!!gate,onEvent:gate?e=>{onEvent(e);gate.event(e);}:onEvent,signal:job.abort.signal});gate?.finish(true);return {summary:updateSummary(done),result:done};}
+   try{/* force: the person pressed Update, so a version that failed its test start here earlier (held back for a day) is tried again (QAGUI-LIN 0213) */const done=await control.update({engine:true,control:false,force:true,stopModel:!!gate,onEvent:gate?e=>{onEvent(e);gate.event(e);}:onEvent,signal:job.abort.signal});gate?.finish(true);return {summary:updateSummary(done),result:done};}
    catch(error){gate?.finish(false);if(gate?.refusal)throw Object.assign(new Error(gate.refusal),{details:`Running outside this app: ${gate.outside.join(', ')}`});throw error;}
   }
   const done=await control.update({engine:false,control:true,onEvent,signal:job.abort.signal});
