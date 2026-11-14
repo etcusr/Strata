@@ -8,7 +8,7 @@ const tools = [
   { name: 'navigate', description: 'Open an HTTP(S) page in the active tab. Use this for web search and source pages.', inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Full http:// or https:// URL.' }, tabId: { type: 'string', description: 'Existing tab ID; omit for the active tab.' } }, required: ['url'], additionalProperties: false } },
   { name: 'snapshot', description: 'Read the active page as a compact accessibility tree. Usually call this before clicking.', inputSchema: { type: 'object', properties: { tabId: { type: 'string' } }, additionalProperties: false } },
   { name: 'links', description: 'List visible page links with their destination URLs. Useful for search results and source verification.', inputSchema: { type: 'object', properties: { tabId: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100 } }, additionalProperties: false } },
-  { name: 'click', description: 'Click one page element by accessible role and name, text, or CSS selector.', inputSchema: { type: 'object', properties: { role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' }, selector: { type: 'string' }, exact: { type: 'boolean' }, tabId: { type: 'string' } }, additionalProperties: false } },
+  { name: 'click', description: 'Click by role plus name, by text alone, or by CSS selector alone. If role and text are given, text is used as the role name.', inputSchema: { type: 'object', properties: { role: { type: 'string' }, name: { type: 'string' }, text: { type: 'string' }, selector: { type: 'string' }, exact: { type: 'boolean' }, tabId: { type: 'string' } }, additionalProperties: false } },
   { name: 'fill', description: 'Fill an input by accessible role and name or CSS selector.', inputSchema: { type: 'object', properties: { value: { type: 'string' }, role: { type: 'string' }, name: { type: 'string' }, selector: { type: 'string' }, tabId: { type: 'string' } }, required: ['value'], additionalProperties: false } },
   { name: 'press', description: 'Press a key such as Enter, Escape, or Tab, optionally in a CSS-selected element.', inputSchema: { type: 'object', properties: { key: { type: 'string' }, selector: { type: 'string' }, tabId: { type: 'string' } }, required: ['key'], additionalProperties: false } },
   { name: 'scroll', description: 'Scroll the page by a number of pixels.', inputSchema: { type: 'object', properties: { direction: { type: 'string', enum: ['up', 'down', 'left', 'right'] }, pixels: { type: 'integer', minimum: 1, maximum: 5000 }, tabId: { type: 'string' } }, required: ['direction'], additionalProperties: false } },
@@ -133,11 +133,12 @@ function short(value, limit = MAX_TEXT) {
 }
 
 function target(page, args, allowText = false) {
-  const methods = Number(Boolean(args.selector)) + Number(Boolean(args.role)) + Number(allowText && Boolean(args.text));
+  const methods = Number(Boolean(args.selector)) + Number(Boolean(args.role)) + Number(allowText && !args.role && Boolean(args.text));
   if (methods !== 1) throw new Error('Give exactly one selector, role, or text target.');
   if (args.role) {
-    if (!args.name) throw new Error('A role target also needs a name.');
-    return page.getByRole(args.role, { name: args.name, exact: args.exact !== false });
+    const name = args.name ?? (allowText ? args.text : null);
+    if (!name) throw new Error('A role target also needs a name.');
+    return page.getByRole(args.role, { name, exact: args.exact !== false });
   }
   if (args.selector) return page.locator(args.selector);
   return page.getByText(args.text, { exact: args.exact !== false });

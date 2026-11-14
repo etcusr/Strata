@@ -25,7 +25,7 @@ const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARN
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 const shellTool = process.platform === 'win32' ? 'pwsh' : 'bash';
-const compactNames = [shellTool, 'skill', 'job_list', 'tool_catalog', 'tool_dispatch'].sort();
+const compactNames = [shellTool, 'skill', 'web_search', 'job_list', 'tool_catalog', 'tool_dispatch'].sort();
 
 test('a Finder launch still makes the bundled ripgrep available to the agent shell', () => {
   const bundled = '/bundle/node_modules/@vscode/ripgrep-darwin-arm64/bin';
@@ -129,7 +129,7 @@ test('on-demand categories separate browser backends and hide unrequested schema
   assert.equal(category('mcp__custom-camoufox-browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
-  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'skill' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'skill', 'job_list']);
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'skill' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'web_search', 'skill', 'job_list']);
 });
 
 test('large JSON web results are condensed before the model sees them', async () => {
@@ -266,11 +266,9 @@ test('on-demand dispatch keeps the named tool permission check', { skip }, async
   assert.equal(existsSync(file), false, 'denying the inner tool prevents the change');
 });
 
-test('on-demand web dispatch asks on the outer card and shows the web tool', { skip }, async (t) => {
+test('on-demand direct web search still asks and shows the web tool', { skip }, async (t) => {
   const r = await rig(t, { onDemand: true, searchMock: 'offline', webWithoutAsking: false });
-  const frames = await r.call('dispatch-web-gate', 'tool_dispatch', {
-    name: 'web_search', arguments: { queries: ['weather Moscow'] },
-  }, { mode: 'manual', answer: 'deny' });
+  const frames = await r.call('direct-web-gate', 'web_search', { queries: ['weather Moscow'] }, { mode: 'manual', answer: 'deny' });
   assert.ok(cards(frames).some(card => card.state === 'proposed' && card.name === 'web_search'));
   assert.ok(cards(frames).some(card => card.state === 'denied'));
 });
@@ -294,7 +292,7 @@ test('a short web task sends small requests even after loading web tools', { ski
   assert.deepEqual(requests[0].toolNames, compactNames);
   assert.ok(requests.slice(1).every(q => JSON.stringify(q.toolNames) === JSON.stringify(requests[0].toolNames)));
   assert.ok(requests.every(q => q.promptChars < 10_000), `the fixed direct-shell and skill schemas stay compact: ${requests.map(q => q.promptChars).join(', ')}`);
-  assert.ok(requests.every(q => JSON.stringify(JSON.parse(q.raw).tools).length < 4500), 'the whole built-in tool inventory is never sent');
+  assert.ok(requests.every(q => JSON.stringify(JSON.parse(q.raw).tools).length < 4700), `the whole built-in tool inventory is never sent: ${requests.map(q => JSON.stringify(JSON.parse(q.raw).tools).length).join(', ')}`);
   assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 36_000, `the four-step request remains bounded with direct shell and skill: ${requests.map(q => q.promptChars).join(', ')}`);
 });
 

@@ -41,10 +41,10 @@ export function visibleTools(_sessionId, tools) {
   if (!Array.isArray(tools)) return tools;
   // Stable on every step: activating a category must not rewrite the first
   // tokens of a prompt whose KV cache is already warm.
-  // Shell and skill loading are frequent primitives. Keeping their real schemas
+  // Shell, skill loading, and web search are frequent primitives. Keeping their real schemas
   // visible avoids local models printing a tool call as text instead of using
   // the dispatcher for a hidden tool.
-  return tools.filter(tool => [CATALOG, DISPATCH, 'skill', 'job_list', 'bash', 'pwsh'].includes(tool.name));
+  return tools.filter(tool => [CATALOG, DISPATCH, 'skill', 'web_search', 'job_list', 'bash', 'pwsh'].includes(tool.name));
 }
 
 export function filteredHeader(sessionId, header) {
@@ -93,7 +93,7 @@ export function apply(ctx, config = {}) {
   wrapFetch();
   ctx.tools.register({
     name: CATALOG,
-    description: 'Find tools only when needed. Shell commands use bash or pwsh directly. For other tools choose groups: files, shell, jobs, web, browser, devtools, skills, helpers, goals, questions, todo, present, connected, or all. Ask for names to see full schemas, then call tool_dispatch with an object in arguments. A simple reply needs no tool call.',
+    description: 'Find tools only when needed. Call bash, pwsh, skill, and web_search directly. For other tools choose groups: files, shell, jobs, web, browser, devtools, skills, helpers, goals, questions, todo, present, connected, or all. Ask for names to see full schemas, then call tool_dispatch with an object in arguments. A simple reply needs no tool call.',
     parameters: { type: 'object', additionalProperties: false, properties: {
       groups: { type: 'array', minItems: 1, items: { type: 'string', enum: [...CATEGORIES, 'all'] } },
       names: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string' }, description: 'Exact tool names whose full argument schemas are needed.' },
@@ -105,13 +105,13 @@ export function apply(ctx, config = {}) {
       if (Array.isArray(args?.names) && args.names.length) {
         const schemas = available.filter(tool => args.names.includes(tool.name)).map(({ name, description, parameters }) => ({ name, description, parameters }));
         if (!schemas.length) return 'No enabled tool with those names.';
-        const detail = `Call bash or pwsh directly for shell commands. For other tools, call tool_dispatch with arguments as an object: ${JSON.stringify(schemas)}`;
+        const detail = `Call bash, pwsh, skill, or web_search directly when available. For other tools, call tool_dispatch with arguments as an object: ${JSON.stringify(schemas)}`;
         if (detail.length <= 7000) return detail;
         if (schemas.length > 1) return 'Those schemas are too large together. Call tool_catalog with one name at a time.';
         const tool = schemas[0];
         const fields = Object.fromEntries(Object.entries(tool.parameters?.properties ?? {}).map(([key, value]) =>
           [key, { type: value.type, description: value.description?.slice(0, 140), enum: value.enum, required: value.required }]));
-        const instruction = ['bash', 'pwsh'].includes(tool.name) ? `Call ${tool.name} directly` : `Call tool_dispatch with ${tool.name} and an object in arguments`;
+        const instruction = ['bash', 'pwsh', 'skill', 'web_search'].includes(tool.name) ? `Call ${tool.name} directly` : `Call tool_dispatch with ${tool.name} and an object in arguments`;
         return `${instruction}. Its required fields are ${JSON.stringify(tool.parameters?.required ?? [])}; argument fields: ${JSON.stringify(fields).slice(0, 6200)}.`;
       }
       if (!chosen.length) return 'Choose a group from the tool_catalog description.';
@@ -123,10 +123,10 @@ export function apply(ctx, config = {}) {
       const ssh = loaded.includes('shell') || loaded.includes('all')
         ? ' For SSH, use noninteractive authentication (BatchMode=yes), a short ConnectTimeout and one connection attempt. Give long remote commands a bounded timeout or run them as a background job. After Permission denied (publickey), stop retrying the same credentials and diagnose the key or agent once.'
         : '';
-      const detailed = `Call bash or pwsh directly for shell commands. For other tools, call tool_dispatch with the exact tool name and an object in arguments: ${JSON.stringify(schemas)}${ssh}`;
+      const detailed = `Call bash, pwsh, skill, or web_search directly when available. For other tools, call tool_dispatch with the exact tool name and an object in arguments: ${JSON.stringify(schemas)}${ssh}`;
       if (detailed.length <= 7000) return detailed;
       const brief = schemas.map(({ name, description, parameters }) => ({ name, description: description?.slice(0, 130), required: parameters?.required, arguments: Object.keys(parameters?.properties ?? {}) }));
-      const summary = `Available tools: ${JSON.stringify(brief)}. Call bash or pwsh directly for shell commands. For other tools, call tool_catalog with names to get the full schema before tool_dispatch.${ssh}`;
+      const summary = `Available tools: ${JSON.stringify(brief)}. Call bash, pwsh, skill, or web_search directly when available. For other tools, call tool_catalog with names to get the full schema before tool_dispatch.${ssh}`;
       return summary.length <= 7000 ? summary : `Available tool names: ${schemas.map(tool => tool.name).join(', ')}. Call tool_catalog with names for the schema of the one you need.${ssh}`;
     },
   });

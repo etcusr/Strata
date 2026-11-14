@@ -62,7 +62,7 @@ export const OS_LINES = {
 /** AGENT_PROMPT with the sentence for `platform` after its first line. */
 export function agentPromptFor(platform = process.platform, onDemand = false) {
   const line = OS_LINES[platform];
-  const prompt = onDemand ? `${AGENT_PROMPT}\n\nUse bash or pwsh directly for commands, including file search. Call skill directly to read a relevant skill. For other tools, call tool_catalog as needed, then tool_dispatch with an object in arguments. Never print tool-call markup as a reply. Never repeat an identical invalid call. A simple reply needs no tool.` : AGENT_PROMPT;
+  const prompt = onDemand ? `${AGENT_PROMPT}\n\nUse bash or pwsh directly for commands, including file search. Call skill directly to read a relevant skill, and web_search directly for a web search. For other tools, call tool_catalog as needed, then tool_dispatch with an object in arguments. Never print tool-call markup as a reply. Never repeat an identical invalid call. A simple reply needs no tool.` : AGENT_PROMPT;
   if (!line) return prompt;
   const [first, ...rest] = prompt.split('\n\n');
   return [first, line, ...rest].join('\n\n');
