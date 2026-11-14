@@ -1,5 +1,5 @@
 /**
- * Web search with no account and no key: DuckDuckGo's own web-page search results, with Bing's plain result page as the second source.
+ * Web search with no account and no key: DuckDuckGo, then Yahoo and Bing result pages.
  *
  * The Harness has three search backends and all of them need a paid service key. This is the fourth: it asks DuckDuckGo's plain
  * HTML search page the way a browser does and reads the result list out of the page. It is the default for the agent's
@@ -15,11 +15,12 @@
  *   - a refused DuckDuckGo page is not followed by the lite page (same refusal, one more strike): the next source is tried instead;
  *   - a timeout or a server error gets one retry after a short pause, then the next source;
  *   - when every source refuses the answer is one plain sentence that also tells the model not to retry (see LIMITED_MESSAGE).
- * Results come from DuckDuckGo or Bing; they are not ranked or filtered here.
+ * Results come from DuckDuckGo, Yahoo or Bing; they are not ranked or filtered here.
  *
  * Nothing in this file touches the Harness, so it can be tested alone. `strata-search.mjs` is the plugin that registers it.
  */
 import { BING_URL, bingLooksBlocked, parseBingResults } from './web-search-bing.mjs';
+import { YAHOO_URL, yahooLooksBlocked, yahooNoResults, parseYahooResults } from './web-search-yahoo.mjs';
 
 export const DDG_PROVIDER_ID = 'strata-duckduckgo';
 
@@ -127,6 +128,7 @@ export const LIMITED_SENTENCE = 'Web search is limited right now. Try again in a
 /** What the tool answers: the sentence, then what the model should do (it must not keep searching). */
 export const BLOCKED_MESSAGE = `${LIMITED_SENTENCE} Do not retry this search: go on with what you know and tell the person, in one plain sentence, that web search was limited.`;
 export const UNREACHABLE_MESSAGE = 'The search could not reach the internet. Check the connection and try again. Do not retry this search now: go on with what you know and say that search was unavailable.';
+export const UNREADABLE_MESSAGE = 'Search pages returned no usable links. Do not retry the same search now; use a relevant site or browser search, and say when results could not be verified.';
 
 /** One request at a time, spaced out with a little randomness, and at most PER_MINUTE a minute. */
 class Pacer {
@@ -165,12 +167,13 @@ const queryKey = query => query.toLowerCase().replace(/\s+/g, ' ').trim();
 /**
  * @param {{fetch?: typeof fetch, now?: () => number, sleep?: (ms: number) => Promise<void>, random?: () => number}} [deps]
  */
-export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), random = Math.random } = {}) {
+export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), random = Math.random, yahooEnabled = true } = {}) {
   const cache = new Map();
 
   /** A source: its pacing, and what to do after it refuses. */
   const source = (id, name) => ({ id, name, pacer: new Pacer({ now, sleep, random }), blockedUntil: 0, strikes: 0, refusals: 0 });
   const ddg = source('duckduckgo', 'DuckDuckGo');
+  const yahoo = source('yahoo', 'Yahoo');
   const bing = source('bing', 'Bing');
   const refuse = (s, res) => {
     s.strikes += 1; s.refusals += 1;
@@ -211,7 +214,7 @@ export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, no
   async function searchDuckDuckGo(query, signal) {
     const form = new URLSearchParams({ q: query, b: '', kl: 'wt-wt', df: '' }).toString();
     const post = (url, origin) => () => [url, { method: 'POST', headers: headers(origin, { 'content-type': 'application/x-www-form-urlencoded' }), body: form }];
-    let reachedOnce = false;
+    let reachedOnce = false, noResults = false;
     for (const [url, origin, parse] of [[HTML_URL, 'https://html.duckduckgo.com', parseHtmlResults], [LITE_URL, 'https://lite.duckduckgo.com', parseLiteResults]]) {
       const page = await ask(ddg, post(url, origin), signal);
       if (page.failure) return { failure: page.failure };
@@ -220,9 +223,20 @@ export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, no
       if (looksBlocked(page.status, page.html)) { refuse(ddg, page.res); return { refused: true }; }
       const sources = parse(page.html);
       if (sources.length) { accepted(ddg); return { sources }; }
+      noResults ||= /no results(?: found)?|did not match any results/i.test(page.html);
     }
     if (reachedOnce) accepted(ddg);
-    return { sources: [] };
+    return { sources: [], noResults };
+  }
+
+  async function searchYahoo(query, signal) {
+    const url = `${YAHOO_URL}?${new URLSearchParams({ p: query })}`;
+    const page = await ask(yahoo, () => [url, { method: 'GET', headers: headers(null) }], signal);
+    if (page.failure) return { failure: page.failure };
+    if (yahooLooksBlocked(page.status, page.html)) { refuse(yahoo, page.res); return { refused: true }; }
+    const sources = parseYahooResults(page.html);
+    accepted(yahoo);
+    return { sources, noResults: !sources.length && yahooNoResults(page.html) };
   }
 
   async function searchBing(query, signal) {
@@ -238,7 +252,7 @@ export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, no
     id: DDG_PROVIDER_ID,
     available: () => typeof fetchImpl === 'function',
     /** What happened so far, for tests and for the status line in the app's log. */
-    status: () => ({ duckduckgo: { strikes: ddg.strikes, refusals: ddg.refusals, blockedForMs: Math.max(0, ddg.blockedUntil - now()) }, bing: { strikes: bing.strikes, refusals: bing.refusals, blockedForMs: Math.max(0, bing.blockedUntil - now()) }, cached: cache.size }),
+    status: () => ({ duckduckgo: { strikes: ddg.strikes, refusals: ddg.refusals, blockedForMs: Math.max(0, ddg.blockedUntil - now()) }, yahoo: { strikes: yahoo.strikes, refusals: yahoo.refusals, blockedForMs: Math.max(0, yahoo.blockedUntil - now()) }, bing: { strikes: bing.strikes, refusals: bing.refusals, blockedForMs: Math.max(0, bing.blockedUntil - now()) }, cached: cache.size }),
     async search(request, signal) {
       const query = String(request.query ?? '').trim().slice(0, 400);
       if (!query) throw new SearchUnavailable('Type what to search for.', 'WEB_PROVIDER_ERROR');
@@ -246,19 +260,26 @@ export function createDuckDuckGoSearch({ fetch: fetchImpl = globalThis.fetch, no
       const want = request.maxResults ?? 10;
       const hit = cache.get(key);
       if (hit && now() - hit.at < CACHE_MS) return { sources: hit.sources.slice(0, want), truncated: false };
-      let limited = false, unreachable = false;
-      for (const [s, run] of [[ddg, searchDuckDuckGo], [bing, searchBing]]) {
+      let limited = false, unreachable = false, unreadable = false, noResults = false;
+      for (const [s, run] of [[ddg, searchDuckDuckGo], ...(yahooEnabled ? [[yahoo, searchYahoo]] : []), [bing, searchBing]]) {
         if (s.blockedUntil > now()) { limited = true; continue; }    // asked again too soon: that only extends a block
         const result = await run(query, signal);
         if (result.refused) { limited = true; continue; }
         if (result.failure) { unreachable = true; continue; }
-        if (!result.sources.length) return { sources: [], truncated: false };      // a real search with no results is an answer, not an error
+        if (!result.sources.length) {
+          // A page that the parser cannot read is not proof that the web has no results. Bing sometimes says
+          // "no results" for a broad query while another source returns good links, so do not trust it alone.
+          if (s !== bing && result.noResults) noResults = true;
+          else unreadable = true;
+          continue;
+        }
         cache.set(key, { at: now(), sources: result.sources });
         if (cache.size > CACHE_SIZE) cache.delete(cache.keys().next().value);
         return { sources: result.sources.slice(0, want), truncated: false };
       }
+      if (noResults && !limited && !unreachable) return { sources: [], truncated: false };
       if (limited) throw new SearchUnavailable(BLOCKED_MESSAGE, 'WEB_RATE_LIMITED');
-      throw new SearchUnavailable(unreachable ? UNREACHABLE_MESSAGE : BLOCKED_MESSAGE, unreachable ? 'WEB_PROVIDER_ERROR' : 'WEB_RATE_LIMITED');
+      throw new SearchUnavailable(unreachable ? UNREACHABLE_MESSAGE : unreadable ? UNREADABLE_MESSAGE : BLOCKED_MESSAGE, unreachable || unreadable ? 'WEB_PROVIDER_ERROR' : 'WEB_RATE_LIMITED');
     },
   };
 }

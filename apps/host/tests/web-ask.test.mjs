@@ -155,9 +155,9 @@ test('Settings -> Tools: "search the web without asking" is off at first, rememb
 test('the profile names the search service in the gate\'s question, and carries the switch', () => {
   const gateOf = tools => JSON.parse(buildProfile({ local: [], tools }).patch.split('\n').slice(1).join('\n')).flatMap(e => e.insert ?? []).find(e => e.id === 'strata-gate').config.web;
   const base = { off: new Set(), search: { provider: 'builtin', key: '' }, servers: {}, webWithoutAsking: false };
-  assert.deepEqual(gateOf(base), { provider: 'DuckDuckGo, or Bing when DuckDuckGo is busy', skipAsk: false });
+  assert.deepEqual(gateOf(base), { provider: 'DuckDuckGo, Yahoo or Bing', skipAsk: false });
   assert.deepEqual(gateOf({ ...base, search: { provider: 'exa', key: 'k' }, webWithoutAsking: true }), { provider: 'Exa', skipAsk: true });
-  assert.equal(gateOf({ ...base, search: { provider: 'perplexity', key: '' } }).provider, 'DuckDuckGo, or Bing when DuckDuckGo is busy', 'a service without its key is not used, so it is not named');
+  assert.equal(gateOf({ ...base, search: { provider: 'perplexity', key: '' } }).provider, 'DuckDuckGo, Yahoo or Bing', 'a service without its key is not used, so it is not named');
 });
 
 // ---------------------------------------------------------------------------------------------- the words, in every language
@@ -166,7 +166,7 @@ test('the card text and the Settings switch exist in all nine languages', async 
   const compiled = await build({ stdin: { contents: "export * from './src/lib/i18n';", resolveDir: process.cwd() }, bundle: true, write: false, platform: 'node', format: 'esm' });
   const { tr, setTranslationLanguage, loadCatalog } = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
   for (const l of ['zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko', 'fr']) await loadCatalog(l);  // the non-English catalogs load on first use (src/lib/i18n.ts loadCatalog); load them before the first tr()
-  const search = manualDecision(SEARCH, { provider: 'DuckDuckGo, or Bing when DuckDuckGo is busy' }).reason;
+  const search = manualDecision(SEARCH, { provider: 'DuckDuckGo, Yahoo or Bing' }).reason;
   const open = manualDecision(FETCH).reason;
   const english = [search, open, 'Let the assistant search the web without asking'];
   for (const language of ['zh', 'ja', 'de', 'es', 'ru', 'pt', 'ko', 'fr']) {
@@ -174,7 +174,7 @@ test('the card text and the Settings switch exist in all nine languages', async 
     for (const text of english) assert.notEqual(tr(text), text, `${language}: ${text}`);
     const translated = tr(search);
     assert.ok(translated.includes('heat pump prices'), `${language}: the person's own words stay as typed`);
-    assert.ok(!translated.includes('Bing when DuckDuckGo is busy'), `${language}: the service's description is translated too`);
+    assert.ok(!translated.includes('Yahoo or Bing'), `${language}: the service's description is translated too`);
     assert.ok(!/\{\d\}/.test(translated), language);
   }
   setTranslationLanguage('en');
@@ -221,7 +221,7 @@ test('real Harness, Manual: the first search shows the Approve/Deny card with th
     },
   });
   assert.equal(asked.length, 1);
-  assert.match(asked[0], /^The assistant wants to search the web for: heat pump prices\. Search words go to DuckDuckGo, or Bing when DuckDuckGo is busy\.$/);
+  assert.match(asked[0], /^The assistant wants to search the web for: heat pump prices\. Search words go to DuckDuckGo, Yahoo or Bing\.$/);
   const last = searchCards(frames).at(-1).tool;
   assert.equal(last.approved, true);
   assert.ok(['done', 'error'].includes(last.state), `the search ran (${last.state}); the pretend web is rate limited`);

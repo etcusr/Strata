@@ -1,6 +1,6 @@
 {
   "s0001": "% PCIe",
-  "s7331": "Les résultats viennent de DuckDuckGo, ou de Bing quand DuckDuckGo est saturé. Vous n’avez besoin ni de compte ni de clé.",
+  "s7331": "Les résultats viennent de DuckDuckGo, Yahoo ou Bing. Vous n’avez besoin ni de compte ni de clé.",
   "s7321": "La recherche web est limitée en ce moment, j’ai donc arrêté de chercher et poursuivi avec ce que j’ai. Réessayez dans une minute, ou ajoutez une clé de recherche dans Paramètres → Outils → Recherche web.",
   "s7322": "J’ai beaucoup cherché et je me suis arrêté pour que cette conversation ne se remplisse pas. Voici ce que j’ai jusqu’ici. Dites-moi ce qu’il faut explorer ensuite.",
   "s7323": "J’ai réécrit le plan plusieurs fois, je m’arrête donc ici avec la dernière version. Dites-moi quoi changer, ou approuvez-la.",
@@ -3286,7 +3286,7 @@
   "s7401": "L’assistant veut ouvrir la page web {0}. Le site de la page voit la requête.",
   "s7402": "Laisser l’assistant chercher sur le web sans demander",
   "s7403": "En mode Manuel, l’assistant demande une fois par conversation avant de chercher sur le web ou d’ouvrir une page web. Activez ceci pour passer cette question.",
-  "s7404": "DuckDuckGo, ou Bing quand DuckDuckGo est saturé",
+  "s7404": "DuckDuckGo, Yahoo ou Bing",
   "s8201": "moins d'1 min",
   "s8202": "{0} min",
   "s8203": "{0} h",

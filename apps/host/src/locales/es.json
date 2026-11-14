@@ -1,6 +1,6 @@
 {
   "s0001": "% PCIe",
-  "s7331": "Los resultados vienen de DuckDuckGo, o de Bing cuando DuckDuckGo está ocupado. No necesitas cuenta ni clave.",
+  "s7331": "Los resultados vienen de DuckDuckGo, Yahoo o Bing. No necesitas cuenta ni clave.",
   "s7321": "La búsqueda web está limitada ahora mismo, así que dejé de buscar y seguí con lo que tengo. Inténtalo de nuevo en un minuto o añade una clave de búsqueda en Ajustes → Herramientas → Búsqueda web.",
   "s7322": "Busqué mucho y me detuve para que este chat no se llene. Esto es lo que tengo hasta ahora. Dime qué quieres que investigue después.",
   "s7323": "Seguí reescribiendo el plan, así que me detuve aquí con la última versión. Dime qué cambiar o apruébalo.",
@@ -3286,7 +3286,7 @@
   "s7401": "El asistente quiere abrir la página web {0}. El sitio de la página ve la solicitud.",
   "s7402": "Dejar que el asistente busque en la web sin preguntar",
   "s7403": "En el modo Manual, el asistente pregunta una vez por chat antes de buscar en la web o abrir una página web. Actívalo para omitir esa pregunta.",
-  "s7404": "DuckDuckGo, o Bing cuando DuckDuckGo está ocupado",
+  "s7404": "DuckDuckGo, Yahoo o Bing",
   "s8201": "menos de 1 min",
   "s8202": "{0} min",
   "s8203": "{0} h",

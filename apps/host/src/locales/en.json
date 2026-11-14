@@ -1,6 +1,6 @@
 {
   "s0001": "% PCIe",
-  "s7331": "Results come from DuckDuckGo, or from Bing when DuckDuckGo is busy. You do not need an account or a key.",
+  "s7331": "Results come from DuckDuckGo, Yahoo or Bing. You do not need an account or a key.",
   "s7321": "Web search is limited right now, so I stopped searching and went on with what I have. Try again in a minute, or add a search key in Settings → Tools → Web search.",
   "s7322": "I searched a lot and stopped so this chat does not fill up. This is what I have so far. Tell me what to look into next.",
   "s7323": "I kept rewriting the plan, so I stopped here with the latest version. Tell me what to change, or approve it.",
@@ -3286,7 +3286,7 @@
   "s7401": "The assistant wants to open the web page {0}. The page's site sees the request.",
   "s7402": "Let the assistant search the web without asking",
   "s7403": "In Manual mode the assistant asks once per chat before it searches the web or opens a web page. Turn this on to skip that question.",
-  "s7404": "DuckDuckGo, or Bing when DuckDuckGo is busy",
+  "s7404": "DuckDuckGo, Yahoo or Bing",
   "s8201": "under 1 min",
   "s8202": "{0} min",
   "s8203": "{0} h",

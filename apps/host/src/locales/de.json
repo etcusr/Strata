@@ -1,6 +1,6 @@
 {
   "s0001": "% PCIe",
-  "s7331": "Die Ergebnisse kommen von DuckDuckGo, oder von Bing, wenn DuckDuckGo ausgelastet ist. Sie brauchen kein Konto und keinen Schlüssel.",
+  "s7331": "Die Ergebnisse kommen von DuckDuckGo, Yahoo oder Bing. Sie brauchen kein Konto und keinen Schlüssel.",
   "s7321": "Die Websuche ist gerade eingeschränkt, deshalb habe ich die Suche beendet und mit dem weitergemacht, was ich habe. Versuchen Sie es in einer Minute erneut oder fügen Sie unter Einstellungen → Tools → Websuche einen Suchschlüssel hinzu.",
   "s7322": "Ich habe viel gesucht und aufgehört, damit dieser Chat nicht überläuft. Das ist mein Stand bisher. Sagen Sie mir, was ich als Nächstes nachschlagen soll.",
   "s7323": "Ich habe den Plan immer wieder umgeschrieben und höre hier mit der letzten Fassung auf. Sagen Sie mir, was ich ändern soll, oder genehmigen Sie ihn.",
@@ -3286,7 +3286,7 @@
   "s7401": "Der Assistent möchte die Webseite {0} öffnen. Die Seite sieht die Anfrage.",
   "s7402": "Den Assistenten ohne Nachfrage im Web suchen lassen",
   "s7403": "Im Modus „Manuell“ fragt der Assistent pro Chat einmal nach, bevor er im Web sucht oder eine Webseite öffnet. Schalte das ein, um die Nachfrage zu überspringen.",
-  "s7404": "DuckDuckGo oder Bing, wenn DuckDuckGo ausgelastet ist",
+  "s7404": "DuckDuckGo, Yahoo oder Bing",
   "s8201": "unter 1 Min.",
   "s8202": "{0} Min.",
   "s8203": "{0} Std.",

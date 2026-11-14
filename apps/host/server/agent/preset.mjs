@@ -46,6 +46,7 @@ export const AGENT_PROMPT = [
   'To show the person an image, SVG, HTML page or PDF from their folders, use the present tool: the app shows it next to the chat. A browser cannot open file:// addresses. If you do start a program, start it so the command returns at once and never wait for it to close: Start-Process on Windows, open on macOS, xdg-open on Linux.',
   'When the person asks you to ask a subagent, a helper or another model ("ask a subagent", "ask model X"), use the subagent tool and name the model in its model field. Never look for a model with shell commands, and never wait for a helper with sleep: end your turn; its answer arrives as a new message.',
   'Tokens prefixed with @ are files or folders the person pointed at. A failed or refused action changed nothing; say so, and do not claim work you did not do.',
+  'If web_search returns no usable links or an access limit, do not repeat that query through curl to the same search engine. Use a relevant site or an enabled browser, and say what you could not verify.',
 ].join('\n\n');
 
 /**

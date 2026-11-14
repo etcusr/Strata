@@ -3,17 +3,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { createDuckDuckGoSearch, BLOCKED_MESSAGE, LIMITED_SENTENCE, UNREACHABLE_MESSAGE } from '../server/web-search-ddg.mjs';
+import { createDuckDuckGoSearch, BLOCKED_MESSAGE, LIMITED_SENTENCE, UNREACHABLE_MESSAGE, UNREADABLE_MESSAGE } from '../server/web-search-ddg.mjs';
 import { bingTarget, parseBingResults, bingLooksBlocked } from '../server/web-search-bing.mjs';
+import { yahooTarget, parseYahooResults, yahooLooksBlocked } from '../server/web-search-yahoo.mjs';
 
 const BING = readFileSync(new URL('./fixtures/bing-results.html', import.meta.url), 'utf8');
 const DDG = `<div class="result"><h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fddg.example%2Fa">DDG one</a></h2>
 <a class="result__snippet" href="x">First snippet</a></div>
 <div class="result"><h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fddg.example%2Fb">DDG two</a></h2></div>`;
 const ANOMALY = '<html><body><div class="anomaly-modal">Unfortunately, bots use DuckDuckGo too.</div></body></html>';
+const YAHOO = `<div class="dd fst algo algo-sr"><div class="compTitle"><a href="https://r.search.yahoo.com/x/RU=https%3A%2F%2Fexample.org%2Fresearch%3Fx%3D1/RK=2"><div class="thmb algo-favicon"></div><h3>Research &amp; results</h3></a></div><div class="compText"><p>Useful <b>source</b>.</p></div></div></li>`;
 
 /** A fake clock whose sleep moves time, and a fake web: `script(url, n)` decides each answer. */
-function world(script, { random = () => 0.5 } = {}) {
+function world(script, { random = () => 0.5, yahoo = false } = {}) {
   let t = 5_000_000;
   const calls = [];
   const fetch = async (url, init) => {
@@ -24,7 +26,7 @@ function world(script, { random = () => 0.5 } = {}) {
     if (out instanceof Error) throw out;
     return out;
   };
-  const search = createDuckDuckGoSearch({ fetch, now: () => t, sleep: async ms => { t += ms; }, random });
+  const search = createDuckDuckGoSearch({ fetch, now: () => t, sleep: async ms => { t += ms; }, random, yahooEnabled: yahoo });
   return { search, calls, advance: ms => { t += ms; }, clock: () => t, hostCalls: host => calls.filter(c => c.url.includes(host)) };
 }
 const page = (body, status = 200, headers = {}) => new Response(body, { status, headers });
@@ -175,4 +177,31 @@ test('Bing: the real result page is read (redirect links decoded, snippets kept)
   assert.equal(bingLooksBlocked(200, '<html><form>captcha</form></html>'), true);
   assert.equal(bingLooksBlocked(200, BING), false);
   assert.deepEqual(parseBingResults('<html>nothing here</html>'), []);
+});
+
+test('Yahoo result cards yield direct links, titles and snippets, including cards with nested blocks', () => {
+  assert.deepEqual(parseYahooResults(YAHOO), [{ url: 'https://example.org/research?x=1', title: 'Research & results', snippet: 'Useful source.' }]);
+  assert.equal(yahooTarget('https://r.search.yahoo.com/x/RU=javascript%3Aalert%281%29/RK=2'), null);
+  assert.equal(yahooTarget('https://search.yahoo.com/search?p=x'), null);
+  assert.equal(yahooLooksBlocked(429, ''), true);
+  assert.equal(yahooLooksBlocked(200, YAHOO), false);
+});
+
+test('Yahoo answers when DuckDuckGo refuses; Bing is not called', async () => {
+  const w = world(call => page(duck(call.url) ? ANOMALY : YAHOO, duck(call.url) ? 202 : 200), { yahoo: true });
+  const result = await w.search.search({ query: 'research' });
+  assert.equal(result.sources[0].url, 'https://example.org/research?x=1');
+  assert.equal(w.hostCalls('search.yahoo.com').length, 1);
+  assert.equal(w.hostCalls('bing.com').length, 0);
+});
+
+test('an unreadable or false-empty result page is reported, not treated as a genuine zero-hit search', async () => {
+  const w = world(call => duck(call.url) ? page(ANOMALY, 202) : page('<html><body>There are no results for a broad search</body></html>'));
+  const error = await w.search.search({ query: 'common broad search' }).catch(e => e);
+  assert.notDeepEqual(error, { sources: [], truncated: false });
+  assert.ok(['WEB_PROVIDER_ERROR', 'WEB_RATE_LIMITED'].includes(error.code));
+  const unreadable = world(() => page('<html><body>Unexpected page layout</body></html>'));
+  const unreadableError = await unreadable.search.search({ query: 'common broad search' }).catch(e => e);
+  assert.equal(unreadableError.code, 'WEB_PROVIDER_ERROR');
+  assert.equal(unreadableError.message, UNREADABLE_MESSAGE);
 });

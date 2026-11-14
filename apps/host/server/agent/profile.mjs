@@ -68,7 +68,7 @@ export const SEARCH_PLUGIN = fileURLToPath(new URL('./plugins/strata-search.mjs'
 export const CUSTOM_TOOLS_SCRIPT = fileURLToPath(new URL('./custom-tools-mcp.mjs', import.meta.url));
 
 /** The search service as the person knows it, for the question that comes before the first web search in a chat. */
-const SEARCH_NAMES = Object.freeze({ builtin: 'DuckDuckGo, or Bing when DuckDuckGo is busy', exa: 'Exa', perplexity: 'Perplexity', deepseek: 'DeepSeek' });
+const SEARCH_NAMES = Object.freeze({ builtin: 'DuckDuckGo, Yahoo or Bing', exa: 'Exa', perplexity: 'Perplexity', deepseek: 'DeepSeek' });
 
 /** What Settings -> Tools says when nothing was chosen. */
 const NO_TOOLS_SETTINGS = Object.freeze({ off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: false, browserEnabled: false, browserPath: null, browserCli: null, servers: {}, hasInstructionTools: false, hasCommandTools: false, toolFile: null });
