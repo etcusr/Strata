@@ -26,6 +26,7 @@ test('a skill name becomes the kebab-case name the agent requires, and its file 
   assert.deepEqual([parsed.name, parsed.title, parsed.description, parsed.body], ['directory-opener', 'Directory opener', 'Opens "folders" for you', INSTRUCTIONS]);
   assert.match(skillFileText({ name: 'x', description: 'd', body: 'b', hidden: true }), /disable-model-invocation: true/);
   assert.deepEqual(parseSkillFile('just text'), { name: null, title: null, description: null, body: 'just text' });
+  assert.deepEqual(parseSkillFile('---\nname: research\ntriggers:\n  - "web search"\n  - "поиск"\n---\n\nRead sources.').triggers, ['web search', 'поиск']);
 });
 
 test('writing a skill refuses a duplicate and an empty name, and materializing makes the agent folder match the list exactly', () => {
@@ -52,11 +53,11 @@ test('the agent profile tells the skills plugin to scan the app skill folder', (
   const dir = '/data/agent/skills-live';
   const entries = JSON.parse(buildProfile({ local: [], connections: [], skillsDir: dir }).patch.split('\n').slice(1).join('\n'));
   const plugins = entries.find(e => e.id === 'preset-standard').config.plugins;
-  assert.deepEqual(plugins.find(p => p.id === 'skill-filesystem').config, { customSkillDirs: [dir] });
+  assert.deepEqual(plugins.find(p => p.id === 'skill-filesystem').config, { customSkillDirs: [dir], includeDefaultRoots: false, watchUsePolling: true });
   assert.ok(plugins.some(p => p.id === 'tool-skill'), 'the skill loader tool is in the preset');
 });
 
-test('real Harness: a skill saved in the app is in the catalog, loads by name, and one added later is seen without a restart', { skip }, async (t) => {
+test('real Harness: an on-demand skill is in the first catalog, loads by name, and one added later is seen without a restart', { skip }, async (t) => {
   const worker = await startScriptedWorker({});
   const dir = mkdtempSync(join(tmpdir(), 'strata-skills-'));
   const ws = join(dir, 'ws'); mkdirSync(ws, { recursive: true });
@@ -64,7 +65,9 @@ test('real Harness: a skill saved in the app is in the catalog, loads by name, a
   const list = [{ id: 'my-directory-opener', name: 'Directory opener', description: 'Opens the Downloads and Documents folders', body: INSTRUCTIONS, enabled: true }];
   materializeSkills(live, list);
   const local = [{ id: 'inst-1', label: 'Scripted', baseUrl: worker.url, modelId: 'scripted-model', context: 32768, slots: 2 }];
-  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], skillsDir: () => live, env: process.env, startTimeoutMs: 90_000 });
+  const bridge = createAgentBridge({ dataDir: dir, localInstances: () => local, connections: () => [], skillsDir: () => live,
+    tools: () => ({ onDemand: true, off: new Set(), search: { provider: 'builtin', key: '' }, webWithoutAsking: true, browserEnabled: false, servers: {}, hasInstructionTools: false, hasCommandTools: false }),
+    env: process.env, startTimeoutMs: 90_000 });
   t.after(async () => { await bridge.close(); await worker.close(); cleanup(dir); });
   const run = async (chatId, message) => {
     const frames = [];

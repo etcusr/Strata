@@ -62,7 +62,7 @@ export const OS_LINES = {
 /** AGENT_PROMPT with the sentence for `platform` after its first line. */
 export function agentPromptFor(platform = process.platform, onDemand = false) {
   const line = OS_LINES[platform];
-  const prompt = onDemand ? `${AGENT_PROMPT}\n\nUse bash or pwsh directly for commands, including file search. For other tools, call tool_catalog as needed, then tool_dispatch with an object in arguments. Never repeat an identical invalid call. A simple reply needs no tool.` : AGENT_PROMPT;
+  const prompt = onDemand ? `${AGENT_PROMPT}\n\nUse bash or pwsh directly for commands, including file search. Call skill directly to read a relevant skill. For other tools, call tool_catalog as needed, then tool_dispatch with an object in arguments. Never print tool-call markup as a reply. Never repeat an identical invalid call. A simple reply needs no tool.` : AGENT_PROMPT;
   if (!line) return prompt;
   const [first, ...rest] = prompt.split('\n\n');
   return [first, line, ...rest].join('\n\n');
@@ -87,7 +87,7 @@ export function standardPreset({ platform = process.platform, search = false, of
     // Background jobs keep running after this bounded read; their completion is delivered separately.
     { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs', config: { waitTimeoutMs: 10_000, maxWaitTimeoutMs: 15_000 } },
     // The skills of the Skills page, written out as folders the Harness scans (and watches: a skill saved in the app is there at once).
-    { id: 'skill-filesystem', name: '@deepseek-ai/dsh-skill-filesystem', ...(skillsDir ? { config: { customSkillDirs: [skillsDir] } } : {}) },
+    { id: 'skill-filesystem', name: '@deepseek-ai/dsh-skill-filesystem', ...(skillsDir ? { config: { customSkillDirs: [skillsDir], includeDefaultRoots: false, watchUsePolling: true } } : {}) },
     { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
     { id: 'command-goal', name: '@deepseek-ai/dsh-command-goal' },
     { id: 'tool-goal', name: '@deepseek-ai/dsh-tool-goal' },

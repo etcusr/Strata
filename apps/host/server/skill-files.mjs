@@ -32,7 +32,22 @@ export function parseSkillFile(text) {
     try { if (/^["']/.test(line)) return typeof JSON.parse(line.replace(/^'(.*)'$/, '"$1"')) === 'string' ? JSON.parse(line.replace(/^'(.*)'$/, '"$1"')) : line; } catch { /* plain scalar */ }
     return line;
   };
-  return { name: field('name'), title: field('title'), description: field('description'), body: raw.slice(m[0].length).trim() };
+  const listField = key => {
+    const lines = m[1].split('\n');
+    const at = lines.findIndex(line => new RegExp(`^${key}:\\s*$`, 'i').test(line));
+    if (at < 0) return null;
+    const values = [];
+    for (const line of lines.slice(at + 1)) {
+      const item = /^\s+-\s+(.+)$/.exec(line);
+      if (!item) break;
+      let value = item[1].trim();
+      try { if (value.startsWith('"')) value = JSON.parse(value); } catch { continue; }
+      if (typeof value === 'string' && value.trim()) values.push(value.trim());
+    }
+    return values;
+  };
+  const triggers = listField('triggers');
+  return { name: field('name'), title: field('title'), description: field('description'), ...(triggers ? { triggers } : {}), body: raw.slice(m[0].length).trim() };
 }
 
 /** Where a skill written in the app lives, and writing it there. */

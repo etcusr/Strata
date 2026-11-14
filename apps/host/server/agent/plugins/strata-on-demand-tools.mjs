@@ -41,9 +41,10 @@ export function visibleTools(_sessionId, tools) {
   if (!Array.isArray(tools)) return tools;
   // Stable on every step: activating a category must not rewrite the first
   // tokens of a prompt whose KV cache is already warm.
-  // Shell is a frequent primitive. Keeping its real schema visible avoids the
-  // nested dispatcher argument that small local models repeatedly truncate.
-  return tools.filter(tool => [CATALOG, DISPATCH, 'job_list', 'bash', 'pwsh'].includes(tool.name));
+  // Shell and skill loading are frequent primitives. Keeping their real schemas
+  // visible avoids local models printing a tool call as text instead of using
+  // the dispatcher for a hidden tool.
+  return tools.filter(tool => [CATALOG, DISPATCH, 'skill', 'job_list', 'bash', 'pwsh'].includes(tool.name));
 }
 
 export function filteredHeader(sessionId, header) {

@@ -25,7 +25,7 @@ const skip = !HARNESS || !resolveHarness({ env: process.env }).ok ? 'STRATA_HARN
 const cleanup = dir => { try { rmSync(dir, { recursive: true, force: true, maxRetries: 3 }); } catch { /* the Harness sandbox leaves access entries; best effort */ } };
 const fwd = p => p.replaceAll('\\', '/');
 const shellTool = process.platform === 'win32' ? 'pwsh' : 'bash';
-const compactNames = [shellTool, 'job_list', 'tool_catalog', 'tool_dispatch'].sort();
+const compactNames = [shellTool, 'skill', 'job_list', 'tool_catalog', 'tool_dispatch'].sort();
 
 test('a Finder launch still makes the bundled ripgrep available to the agent shell', () => {
   const bundled = '/bundle/node_modules/@vscode/ripgrep-darwin-arm64/bin';
@@ -129,7 +129,7 @@ test('on-demand categories separate browser backends and hide unrequested schema
   assert.equal(category('mcp__custom-camoufox-browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
-  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'job_list']);
+  assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'skill' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'skill', 'job_list']);
 });
 
 test('large JSON web results are condensed before the model sees them', async () => {
@@ -217,7 +217,7 @@ test('on-demand tool schemas stay stable after catalog and on a later greeting',
   const greeting = r.worker.requests.at(-1);
   assert.deepEqual(greeting.toolNames, first.toolNames);
   const fresh = await r.run('fresh-hello', 'SCRIPT:hello');
-  assert.ok(r.worker.requests.at(-1).promptChars < 7000, 'a fresh short reply does not carry the full tool catalog');
+  assert.ok(r.worker.requests.at(-1).promptChars < 8000, 'a fresh short reply does not carry the full tool catalog');
   const shown = fresh.filter(f => f.type === 'context').at(-1)?.contextTokens;
   assert.ok(shown > 0 && shown < 2000, `the context meter reads the compact request (${shown})`);
 });
@@ -293,9 +293,9 @@ test('a short web task sends small requests even after loading web tools', { ski
   assert.equal(requests.length, 4, 'catalog, search, fetch, answer');
   assert.deepEqual(requests[0].toolNames, compactNames);
   assert.ok(requests.slice(1).every(q => JSON.stringify(q.toolNames) === JSON.stringify(requests[0].toolNames)));
-  assert.ok(requests.every(q => q.promptChars < 9000), `the fixed direct-shell schema stays compact: ${requests.map(q => q.promptChars).join(', ')}`);
+  assert.ok(requests.every(q => q.promptChars < 10_000), `the fixed direct-shell and skill schemas stay compact: ${requests.map(q => q.promptChars).join(', ')}`);
   assert.ok(requests.every(q => JSON.stringify(JSON.parse(q.raw).tools).length < 4500), 'the whole built-in tool inventory is never sent');
-  assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 33_000, `the four-step request remains bounded with direct shell: ${requests.map(q => q.promptChars).join(', ')}`);
+  assert.ok(requests.reduce((sum, q) => sum + q.promptChars, 0) < 36_000, `the four-step request remains bounded with direct shell and skill: ${requests.map(q => q.promptChars).join(', ')}`);
 });
 
 test('the agent is offered exactly these tools: everything useful including web search (no key needed), no scheduler, and the question tool the app can answer', { skip }, async (t) => {

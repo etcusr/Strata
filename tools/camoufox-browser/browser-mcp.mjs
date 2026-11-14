@@ -3,6 +3,7 @@
 import { createInterface } from 'node:readline';
 
 const MAX_TEXT = 12_000;
+const PAGE_CREATE_TIMEOUT_MS = 15_000;
 const tools = [
   { name: 'navigate', description: 'Open an HTTP(S) page in the active tab. Use this for web search and source pages.', inputSchema: { type: 'object', properties: { url: { type: 'string', description: 'Full http:// or https:// URL.' }, tabId: { type: 'string', description: 'Existing tab ID; omit for the active tab.' } }, required: ['url'], additionalProperties: false } },
   { name: 'snapshot', description: 'Read the active page as a compact accessibility tree. Usually call this before clicking.', inputSchema: { type: 'object', properties: { tabId: { type: 'string' } }, additionalProperties: false } },
@@ -48,7 +49,12 @@ async function ensureBrowser() {
       const launched = await Camoufox({ headless: process.env.STRATA_CAMOUFOX_HEADLESS === '1', os, timeout: 30_000 });
       try {
         const created = await NewContext(launched, { viewport: { width: 1280, height: 900 } });
-        created.on('page', register);
+        created.on('page', page => {
+          // A timed-out newPage may complete after this context was discarded.
+          // Do not put that late page back into the active tab registry.
+          if (context === created) register(page);
+          else void page.close().catch(() => {});
+        });
         browser = launched;
         context = created;
       } catch (error) {
@@ -60,12 +66,57 @@ async function ensureBrowser() {
   await launchPromise;
 }
 
+async function openPage() {
+  let timer;
+  try {
+    return await Promise.race([
+      context.newPage(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`Camoufox page creation timed out after ${PAGE_CREATE_TIMEOUT_MS}ms`)), PAGE_CREATE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function discardBrowser() {
+  const failedBrowser = browser;
+  const failedContext = context;
+  browser = undefined;
+  context = undefined;
+  launchPromise = undefined;
+  activeTabId = undefined;
+  await failedContext?.close().catch(() => {});
+  await failedBrowser?.close().catch(() => {});
+  tabs.clear();
+}
+
+async function createPage() {
+  try {
+    return await openPage();
+  } catch (firstError) {
+    // A fresh Camoufox instance can occasionally have no browser window when
+    // Juggler receives Browser.newPage. Preserve existing tabs if this is a
+    // later-page failure; only the first page may restart the browser once.
+    if (tabs.size) throw firstError;
+    try {
+      await discardBrowser();
+      await ensureBrowser();
+      return await openPage();
+    } catch (retryError) {
+      await discardBrowser();
+      throw new Error(`Camoufox could not open its first tab. First attempt: ${String(firstError?.message ?? firstError)}. Retry after a fresh browser: ${String(retryError?.message ?? retryError)}`, { cause: retryError });
+    }
+  }
+}
+
 async function pageFor(tabId) {
   await ensureBrowser();
   const id = tabId ?? activeTabId;
   if (id && tabs.has(id)) return [id, tabs.get(id)];
   if (tabId) throw new Error(`Unknown tab ID: ${tabId}`);
-  const page = await context.newPage();
+  const page = await createPage();
   return [register(page), page];
 }
 
@@ -106,7 +157,7 @@ async function call(name, args) {
     const action = args.action ?? 'list';
     if (action === 'list') return tabList();
     if (action === 'new') {
-      const page = await context.newPage();
+      const page = await createPage();
       const id = register(page);
       if (args.url) await page.goto(safeUrl(args.url), { waitUntil: 'domcontentloaded', timeout: 25_000 });
       return { id, url: page.url(), title: await page.title() };

@@ -392,6 +392,7 @@ for the choice being made.`,
   for (const [dir, source, prefix] of [[CREATED_SKILLS, 'created', 'my-'], [join(WORKSPACE, 'skills'), 'workspace', 'ws-']]) {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
     for (const name of readdirSync(dir)) {
+      if (name.startsWith('.')) continue;
       const full = join(dir, name);
       try { if (!statSync(full).isDirectory()) continue; } catch { continue; }
       let text = '', sizeKb = 1;
@@ -404,7 +405,7 @@ for the choice being made.`,
         description: parsed.description ?? (source === 'created' ? 'A skill you wrote.' : `Workspace skill loaded from ${name}/SKILL.md`),
         source,
         enabled: true,
-        triggers: [name.replace(/-/g, ' ')],
+        triggers: parsed.triggers ?? [name.replace(/-/g, ' ')],
         body: parsed.body,
         sizeKb: Number(sizeKb.toFixed(1)),
       });
