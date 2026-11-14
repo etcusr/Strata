@@ -23,7 +23,7 @@ This main skill may be mirrored into `skills-live` without its supporting files.
 | Code review or review feedback | `engineering-code-review/SKILL.md` |
 | README, API guide, runbook, handoff | `engineering-documentation/SKILL.md` |
 | Before claiming completion | `verification-before-completion/SKILL.md` |
-| Interactive website or failed page fetch | `browser-devtools/SKILL.md` |
+| Interactive website or failed page fetch | `browser-interaction/SKILL.md` |
 | Explicit security audit | `security-audit/SKILL.md` |
 
 Read a supporting file when its stage arrives, not all of them at the start. Do not reread an unchanged file in the same task. Nested files are package resources, not separate registered Strata skills.

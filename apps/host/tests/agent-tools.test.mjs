@@ -126,6 +126,7 @@ test('a long job_output request releases the agent within the configured wait ca
 
 test('on-demand categories separate browser backends and hide unrequested schemas', () => {
   assert.equal(category('mcp__browser__navigate'), 'browser');
+  assert.equal(category('mcp__custom-camoufox-browser__navigate'), 'browser');
   assert.equal(category('mcp__custom-chrome-devtools__list_pages'), 'devtools');
   assert.equal(category('mcp__github__create_issue'), 'connected');
   assert.deepEqual(visibleTools('unopened', [{ name: 'tool_catalog' }, { name: 'tool_dispatch' }, { name: 'bash' }, { name: 'web_search' }, { name: 'job_list' }]).map(t => t.name), ['tool_catalog', 'tool_dispatch', 'bash', 'job_list']);
@@ -156,7 +157,7 @@ test('a profile with every tool disabled does not mention an unavailable catalog
 test('the profile loads the gate by path, sizes helper agents to the engine slots and keeps no secret', () => {
   const p = buildProfile({ local: [{ id: 'a', baseUrl: 'http://127.0.0.1:1/v1', modelId: 'm', context: 32768, slots: 2, key: 'sekret-key-123' }] });
   const entries = JSON.parse(p.patch.split('\n').slice(1).join('\n'));
-  assert.deepEqual(entries.find(e => e.insert)?.insert, [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: 'DuckDuckGo, or Bing when DuckDuckGo is busy', skipAsk: false } } }]);
+  assert.deepEqual(entries.find(e => e.insert)?.insert, [{ id: 'strata-gate', name: GATE_PLUGIN, config: { web: { provider: 'DuckDuckGo, Yahoo or Bing', skipAsk: false } } }]);
   assert.ok(existsSync(GATE_PLUGIN));
   assert.equal(entries.find(e => e.id === 'subagent').config.maxActiveSubagents, 4, 'at least the 4 helpers; more only with more slots');
   assert.equal(entries.find(e => e.id === 'preset-standard').config.plugins.some(x => x.id === 'tool-schedule'), false);

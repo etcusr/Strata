@@ -31,6 +31,7 @@ export function category(name) {
   if (name === 'todo_write') return 'todo';
   if (name === 'present') return 'present';
   if (name.startsWith('mcp__browser__')) return 'browser';
+  if (name.startsWith('mcp__custom-camoufox-browser__')) return 'browser';
   if (name.startsWith('mcp__') && /chrome.devtools/i.test(name)) return 'devtools';
   if (name.startsWith('mcp__')) return 'connected';
   return 'connected'; // A new enabled tool remains discoverable instead of silently disappearing.

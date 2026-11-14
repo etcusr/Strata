@@ -1,0 +1,18 @@
+{
+  "name": "strata-camoufox-browser",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Local Camoufox MCP browser for Strata",
+  "scripts": {
+    "start": "node browser-mcp.mjs",
+    "fetch": "camoufox fetch"
+  },
+  "dependencies": {
+    "camoufox": "0.5.9",
+    "playwright-core": "1.62.0"
+  },
+  "engines": {
+    "node": ">=22.15"
+  }
+}
