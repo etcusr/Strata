@@ -80,7 +80,7 @@ export function findControl({ env = process.env, platform = process.platform, ex
  * "an API key was given but it is empty".
  */
 export function sourceServerEnvironment(env = process.env) {
-  const next = { ...env, PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+  const next = { ...env, PYTHONDONTWRITEBYTECODE: '1', PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
   delete next.STRATA_API_KEY;
   return next;
 }
@@ -91,7 +91,7 @@ export function controlEnvironment(control, { env = process.env, components = co
   for (const key of ['PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP', 'VIRTUAL_ENV', 'STRATA_PYTHON', 'STRATA_NATIVE_PYTHON', 'STRATA_API_KEY']) delete next[key];
   const result = {
     ...next,
-    PYTHONNOUSERSITE: '1', PYTHONUTF8: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8',
+    PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1', PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8',
     STRATA_NO_ACQUIRE: '1', STRATA_COMPONENTS_DIR: components,
     // The app's own settings file, beside its components: Control and the installer never read or write the file an older
     // command-line Strata keeps in %APPDATA% / ~/.config (its list of Strata folders), so an old install is never adopted.

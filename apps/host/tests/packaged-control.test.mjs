@@ -57,6 +57,7 @@ test("Control runs on its own interpreter with nothing from the user's Python an
   assert.equal(env.VIRTUAL_ENV, undefined);
   assert.equal(env.STRATA_PYTHON, undefined);
   assert.equal(env.PYTHONNOUSERSITE, '1');
+  assert.equal(env.PYTHONDONTWRITEBYTECODE, '1', 'packaged Control must not modify signed app resources');
   assert.equal(env.STRATA_NO_ACQUIRE, '1');
   assert.equal(env.STRATA_COMPONENTS_DIR, '/components');
   assert.equal(env.STRATA_API_KEY, undefined, 'an inherited inference key never reaches the engine (the run config carries its own)');
